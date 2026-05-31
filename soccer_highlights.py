@@ -60,6 +60,11 @@ CONF_MAYBE     = 0.40   # 이 값 이상 ~ AUTO 미만이면 '확인 필요'로 
 
 SPAWN_RETRIES  = 4      # ffmpeg 프로세스 생성 실패(WinError 5 등) 시 재시도 횟수
 
+# --- 출력 인코딩 (용량/화질 트레이드오프) ---
+ENCODE_PRESET  = "medium"  # 압축 효율. veryfast(빠름,큼) ~ slow(느림,작음)
+ENCODE_CRF     = 23        # 화질/용량. 낮을수록 고화질·고용량 (18~28 권장)
+MAX_HEIGHT     = 1080      # 이 높이를 넘으면 다운스케일 (None이면 원본 유지)
+
 # --- 타이틀 워터마크 (영상 우상단 작은 제목) ---
 TITLE_TEXT     = ""     # 비우면 타이틀 없음. 예: "한울타리 FC 경기영상"
 TITLE_FONT     = r"C:\Windows\Fonts\NanumGothic.ttf"  # 한글 지원 폰트
@@ -361,14 +366,23 @@ def build_output(video, segments, out_path, workdir, title=None):
     title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
     """
     title = title if title is not None else TITLE_TEXT
-    vf = None
+    drawtext = None
     if (title or "").strip():
         # 폰트를 작업폴더에 복사해 콜론 없는 상대경로(cwd 기준)로 참조한다.
         try:
             shutil.copyfile(TITLE_FONT, workdir / "title_font.ttf")
-            vf = _drawtext_filter(title, "title_font.ttf")
+            drawtext = _drawtext_filter(title, "title_font.ttf")
         except Exception as e:
             sys.stderr.write(f"타이틀 폰트 로드 실패, 타이틀 생략: {e}\n")
+
+    # 비디오 필터 체인 구성: 다운스케일(상한 초과 시) → 타이틀 순서
+    filters = []
+    if MAX_HEIGHT:
+        # 높이가 MAX_HEIGHT를 넘을 때만 축소(확대 안 함). 폭은 짝수 자동.
+        filters.append(f"scale=-2:'min(ih,{MAX_HEIGHT})'")
+    if drawtext:
+        filters.append(drawtext)
+    vf = ",".join(filters) if filters else None
 
     clip_paths = []
     for i, seg in enumerate(segments):
@@ -379,8 +393,9 @@ def build_output(video, segments, out_path, workdir, title=None):
                "-t", f"{dur:.2f}"]
         if vf:
             cmd += ["-vf", vf]
-        cmd += ["-c:v", "libx264", "-preset", "veryfast",
-                "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
+        cmd += ["-c:v", "libx264", "-preset", ENCODE_PRESET,
+                "-crf", str(ENCODE_CRF), "-c:a", "aac",
+                "-avoid_negative_ts", "make_zero",
                 str(clip), "-loglevel", "error"]
         # cwd=workdir: drawtext가 title_font.ttf 를 상대경로로 찾도록
         run(cmd, cwd=str(workdir))
