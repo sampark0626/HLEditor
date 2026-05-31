@@ -1,0 +1,4 @@
+numpy
+scipy
+google-genai
+flask

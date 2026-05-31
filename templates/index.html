@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>축구 하이라이트 추출기</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2230; --line:#2a3546; --txt:#e6edf3;
+          --muted:#8b98a9; --accent:#3fb950; --warn:#d29922; --rej:#6e7681;
+          --blue:#2f81f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); line-height:1.5; }
+  header { padding:18px 26px; border-bottom:1px solid var(--line); display:flex;
+           align-items:baseline; gap:12px; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:13px; }
+  .wrap { max-width:980px; margin:0 auto; padding:22px 26px 60px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:18px 20px; margin-bottom:18px; }
+  .card h2 { font-size:14px; margin:0 0 14px; color:var(--muted); font-weight:600;
+             text-transform:uppercase; letter-spacing:.04em; }
+  .step-num { display:inline-block; width:22px; height:22px; line-height:22px;
+              text-align:center; background:var(--blue); color:#fff; border-radius:50%;
+              font-size:12px; margin-right:8px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  input[type=text], input[type=number] { background:#0d1117; border:1px solid var(--line);
+          color:var(--txt); border-radius:7px; padding:9px 11px; font-size:13px; }
+  input[type=text] { flex:1; min-width:220px; }
+  input[type=number] { width:72px; }
+  button { background:var(--blue); color:#fff; border:none; border-radius:7px;
+           padding:9px 16px; font-size:13px; cursor:pointer; font-weight:600; }
+  button:hover { filter:brightness(1.1); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.ghost { background:#21304a; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; }
+  table { width:100%; border-collapse:collapse; margin-top:6px; font-size:13px; }
+  th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  tr.auto { background:rgba(63,185,80,.08); }
+  tr.maybe { background:rgba(210,153,34,.08); }
+  tr.reject { opacity:.5; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:11px; font-weight:600; }
+  .tag.auto { background:var(--accent); color:#04260c; }
+  .tag.maybe { background:var(--warn); color:#3a2c00; }
+  .tag.reject { background:var(--rej); color:#161b22; }
+  .slider-row { display:flex; align-items:center; gap:14px; }
+  input[type=range] { flex:1; accent-color:var(--blue); }
+  .conf-val { font-variant-numeric:tabular-nums; min-width:44px; font-weight:700;
+              color:var(--blue); }
+  .stat { display:flex; gap:18px; margin-top:12px; font-size:13px; }
+  .stat b { color:var(--accent); }
+  .stat .m { color:var(--warn); }
+  #status { font-size:13px; min-height:20px; margin-top:10px; }
+  .err { color:#f85149; }
+  .ok { color:var(--accent); }
+  .spin { display:inline-block; width:13px; height:13px; border:2px solid var(--muted);
+          border-top-color:var(--blue); border-radius:50%; animation:s .7s linear infinite;
+          vertical-align:-2px; margin-right:6px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+  .disabled-card { opacity:.45; pointer-events:none; }
+  video { width:100%; border-radius:8px; margin-top:12px; background:#000; }
+  code { background:#0d1117; padding:1px 6px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚽ 축구 하이라이트 추출기</h1>
+  <span class="sub">음성 급증 + Gemini 비전 판별 · 로컬 UI</span>
+</header>
+
+<div class="wrap">
+
+  <!-- STEP 1 -->
+  <div class="card" id="card-detect">
+    <h2><span class="step-num">1</span>영상 선택 & 후보 검출 <span style="color:var(--muted);font-weight:400">(무료, API 호출 없음)</span></h2>
+    <div class="row">
+      <input type="text" id="video" placeholder="경기 영상 파일 경로 (예: C:\videos\match.mp4)">
+      <button class="ghost" id="btn-browse">찾아보기…</button>
+      <button id="btn-detect">후보 검출</button>
+    </div>
+    <div class="hint">먼저 오디오 볼륨이 튀는 구간만 빠르게 찾습니다. 후보가 너무 많으면(30분 영상 100+) 비전 비용이 커지니 참고하세요.</div>
+    <div id="detect-info"></div>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="card disabled-card" id="card-classify">
+    <h2><span class="step-num">2</span>Gemini 비전 판별 <span style="color:var(--muted);font-weight:400">(병렬 · 가장 오래 걸리는 단계)</span></h2>
+    <div class="row">
+      <label class="hint" style="margin:0">병렬 수
+        <input type="number" id="workers" min="1" max="8" value="{{ workers }}"></label>
+      <button id="btn-classify">비전 판별 실행</button>
+      {% if not has_key %}<span class="err">⚠ GEMINI_API_KEY 없음 (.env 확인)</span>{% endif %}
+    </div>
+    <div class="hint">각 후보 구간의 프레임을 Gemini에 보내 하이라이트 여부를 판단합니다. 결과는 <code>results.json</code>에 자동 저장됩니다.</div>
+  </div>
+
+  <!-- STEP 3 -->
+  <div class="card disabled-card" id="card-select">
+    <h2><span class="step-num">3</span>신뢰도 임계 조정 <span style="color:var(--muted);font-weight:400">(즉시 · API 재호출 없음)</span></h2>
+    <div class="slider-row">
+      <span class="hint" style="margin:0">느슨</span>
+      <input type="range" id="conf" min="0.3" max="0.95" step="0.05" value="{{ conf_auto }}">
+      <span class="hint" style="margin:0">엄격</span>
+      <span class="conf-val" id="conf-val">{{ conf_auto }}</span>
+    </div>
+    <div class="stat">
+      <span>✅ 자동 채택 <b id="n-auto">0</b>개</span>
+      <span class="m">⚠️ 확인필요 <span id="n-maybe">0</span>개</span>
+    </div>
+    <table id="cand-table">
+      <thead><tr><th>#</th><th>시각</th><th>+dB</th><th>유형</th><th>신뢰도</th><th>판정</th><th>근거</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- STEP 4 -->
+  <div class="card disabled-card" id="card-build">
+    <h2><span class="step-num">4</span>하이라이트 영상 생성</h2>
+    <div class="row">
+      <input type="text" id="output" value="highlights.mp4" style="flex:0 0 240px">
+      <button id="btn-build">영상 생성</button>
+    </div>
+    <div id="build-info"></div>
+    <video id="preview" controls style="display:none"></video>
+  </div>
+
+  <div id="status"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let visionDone = false;
+
+function setStatus(msg, cls="") { $("#status").innerHTML = msg ? `<span class="${cls}">${msg}</span>` : ""; }
+function busy(msg) { setStatus(`<span class="spin"></span>${msg}`); }
+function enable(id) { $(id).classList.remove("disabled-card"); }
+
+async function api(path, body) {
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify(body||{})});
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || "요청 실패");
+  return data;
+}
+
+function renderTable(cands) {
+  const tb = $("#cand-table tbody");
+  tb.innerHTML = "";
+  for (const c of cands) {
+    const tag = c.flag==="auto" ? `<span class="tag auto">채택</span>`
+              : c.flag==="maybe" ? `<span class="tag maybe">확인필요</span>`
+              : `<span class="tag reject">제외</span>`;
+    tb.insertAdjacentHTML("beforeend", `<tr class="${c.flag}">
+      <td>${c.idx+1}</td><td>${c.peak}s</td><td>+${c.delta_db}</td>
+      <td>${c.type}</td><td>${visionDone ? c.confidence : "-"}</td>
+      <td>${tag}</td><td style="color:var(--muted)">${c.reason||""}</td></tr>`);
+  }
+  const auto = cands.filter(c=>c.flag==="auto").length;
+  const maybe = cands.filter(c=>c.flag==="maybe").length;
+  $("#n-auto").textContent = auto;
+  $("#n-maybe").textContent = maybe;
+}
+
+// STEP 1
+$("#btn-browse").onclick = async () => {
+  busy("파일 선택 창을 여는 중… (작업표시줄 확인)");
+  try { const d = await api("/api/browse"); if (d.path) $("#video").value = d.path; setStatus(""); }
+  catch(e){ setStatus(e.message, "err"); }
+};
+$("#btn-detect").onclick = async () => {
+  const video = $("#video").value.trim();
+  if (!video) return setStatus("영상 경로를 입력하세요.", "err");
+  busy("오디오 분석 중…");
+  try {
+    const d = await api("/api/detect", {video});
+    $("#detect-info").innerHTML =
+      `<div class="hint ok">길이 ${d.duration}s · 후보 <b>${d.count}개</b> 검출됨</div>`;
+    visionDone = false;
+    renderTable(d.candidates);
+    enable("#card-classify"); enable("#card-select");
+    $("#card-build").classList.add("disabled-card");
+    setStatus("후보 검출 완료. 비전 판별을 진행하세요.", "ok");
+  } catch(e){ setStatus(e.message, "err"); }
+};
+
+// STEP 2
+$("#btn-classify").onclick = async () => {
+  const conf = parseFloat($("#conf").value);
+  const workers = parseInt($("#workers").value)||6;
+  busy("Gemini 비전 판별 중… 후보 수에 따라 수 분 걸릴 수 있습니다.");
+  try {
+    const d = await api("/api/classify", {conf, workers});
+    visionDone = true;
+    renderTable(d.candidates);
+    enable("#card-build");
+    setStatus("비전 판별 완료. 슬라이더로 임계를 조정하거나 바로 영상을 생성하세요.", "ok");
+  } catch(e){ setStatus(e.message, "err"); }
+};
+
+// STEP 3 — conf slider live reselect
+let selTimer;
+$("#conf").oninput = () => {
+  $("#conf-val").textContent = parseFloat($("#conf").value).toFixed(2);
+  clearTimeout(selTimer);
+  selTimer = setTimeout(async () => {
+    try { const d = await api("/api/select", {conf: parseFloat($("#conf").value)});
+          renderTable(d.candidates); } catch(e){}
+  }, 120);
+};
+
+// STEP 4
+$("#btn-build").onclick = async () => {
+  const conf = parseFloat($("#conf").value);
+  const output = $("#output").value.trim() || "highlights.mp4";
+  busy("클립 분할·병합 중… 채택 구간이 많으면 시간이 걸립니다.");
+  try {
+    const d = await api("/api/build", {conf, output});
+    $("#build-info").innerHTML = `<div class="hint ok">완료: <code>${d.output}</code> (${d.n}개 구간)</div>`;
+    const v = $("#preview"); v.src = "/api/preview?t=" + Date.now();
+    v.style.display = "block";
+    setStatus("영상 생성 완료 ✓", "ok");
+  } catch(e){ setStatus(e.message, "err"); }
+};
+</script>
+</body>
+</html>
