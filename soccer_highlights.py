@@ -61,9 +61,25 @@ CONF_MAYBE     = 0.40   # 이 값 이상 ~ AUTO 미만이면 '확인 필요'로 
 SPAWN_RETRIES  = 4      # ffmpeg 프로세스 생성 실패(WinError 5 등) 시 재시도 횟수
 
 # --- 출력 인코딩 (용량/화질 트레이드오프) ---
-ENCODE_PRESET  = "medium"  # 압축 효율. veryfast(빠름,큼) ~ slow(느림,작음)
-ENCODE_CRF     = 23        # 화질/용량. 낮을수록 고화질·고용량 (18~28 권장)
+# 속도는 preset이, 용량은 CRF가 좌우한다. fast+CRF25가 속도·용량 균형점.
+ENCODE_PRESET  = "fast"    # 압축 속도. veryfast(빠름,큼) ~ slow(느림,작음)
+ENCODE_CRF     = 25        # 화질/용량. 낮을수록 고화질·고용량 (18~28 권장)
 MAX_HEIGHT     = 1080      # 이 높이를 넘으면 다운스케일 (None이면 원본 유지)
+
+# 출력 품질 프리셋 (UI/CLI 선택용). copy=stream-copy(재인코딩 없음, 타이틀 불가)
+QUALITY_PRESETS = {
+    "size":    {"preset": "fast",   "crf": 26, "label": "용량 우선"},
+    "balanced":{"preset": "fast",   "crf": 25, "label": "균형(기본)"},
+    "quality": {"preset": "medium", "crf": 23, "label": "화질 우선"},
+    "copy":    {"copy": True,                  "label": "초고속(무손실 복사·타이틀 없음)"},
+}
+
+# 검출 민감도 프리셋 (UI/CLI 선택용) → (percentile, min_db)
+SENSITIVITY_PRESETS = {
+    "more":   {"percentile": 90, "min_db": 6.0, "label": "많이 잡기"},
+    "normal": {"percentile": 95, "min_db": 8.0, "label": "보통(기본)"},
+    "strict": {"percentile": 98, "min_db": 11.0, "label": "엄선"},
+}
 
 # --- 타이틀 워터마크 (영상 우상단 작은 제목) ---
 TITLE_TEXT     = ""     # 비우면 타이틀 없음. 예: "한울타리 FC 경기영상"
@@ -114,8 +130,14 @@ def probe_duration(video):
 
 
 # ----------------------------------------------------------------------------
-def detect_spikes(video, workdir):
-    """오디오를 추출하고 볼륨 급증 후보 구간을 반환."""
+def detect_spikes(video, workdir, percentile=None, min_db=None):
+    """오디오를 추출하고 볼륨 급증 후보 구간을 반환.
+
+    percentile/min_db: 지정 시 모듈 기본값(SPIKE_PERCENTILE/SPIKE_MIN_DB)을
+        덮어쓴다. 값이 클수록 후보가 줄어든다(엄선).
+    """
+    percentile = SPIKE_PERCENTILE if percentile is None else percentile
+    min_db = SPIKE_MIN_DB if min_db is None else min_db
     wav = workdir / "audio.wav"
     run(["ffmpeg", "-y", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
          "-f", "wav", str(wav), "-loglevel", "error"])
@@ -143,7 +165,7 @@ def detect_spikes(video, workdir):
                          for i in range(len(db))])
     delta = db - baseline
 
-    thr = max(np.percentile(delta, SPIKE_PERCENTILE), SPIKE_MIN_DB)
+    thr = max(np.percentile(delta, percentile), min_db)
     above = delta > thr
 
     # 연속 구간 묶기
@@ -265,7 +287,7 @@ def classify_with_gemini(frames, client):
 
 
 def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
-                          should_cancel=None):
+                          should_cancel=None, on_progress=None):
     """모든 후보에 대해 프레임 추출 + Gemini 판별을 병렬로 실행.
 
     후보 간 순서 의존성이 없으므로 ThreadPoolExecutor로 동시 처리한다.
@@ -327,6 +349,8 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
             print(f"        #{idx+1:2d} peak@{c['peak']:6.1f}s "
                   f"[{res.get('type','?'):6}] conf={conf:.2f} {flag}  "
                   f"{res.get('reason','')}")
+            if on_progress:
+                on_progress(len(results), len(cands))
 
     # 판별된 후보만 결과 반영 (취소된 경우 일부는 비전 결과 없음)
     for i, c in enumerate(cands):
@@ -360,30 +384,42 @@ def _drawtext_filter(title, font_name):
             f"shadowcolor=black@0.5:shadowx=1:shadowy=1")
 
 
-def build_output(video, segments, out_path, workdir, title=None):
+def build_output(video, segments, out_path, workdir, title=None,
+                 preset=None, crf=None, copy_mode=False, max_height=None,
+                 on_progress=None):
     """선택된 구간들을 잘라 이어붙여 최종 영상 생성.
 
     title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
+    preset/crf: 인코딩 속도/용량 (기본 ENCODE_PRESET/ENCODE_CRF).
+    copy_mode: True면 stream-copy(재인코딩 없음)로 가장 빠르게. 단 키프레임
+        경계로 시작점이 약간 어긋날 수 있고 **타이틀/다운스케일이 적용 안 됨**.
+    max_height: 다운스케일 상한 (기본 MAX_HEIGHT). copy_mode면 무시.
+    on_progress: on_progress(done, total) 콜백 (진행 표시용).
     """
-    title = title if title is not None else TITLE_TEXT
-    drawtext = None
-    if (title or "").strip():
-        # 폰트를 작업폴더에 복사해 콜론 없는 상대경로(cwd 기준)로 참조한다.
-        try:
-            shutil.copyfile(TITLE_FONT, workdir / "title_font.ttf")
-            drawtext = _drawtext_filter(title, "title_font.ttf")
-        except Exception as e:
-            sys.stderr.write(f"타이틀 폰트 로드 실패, 타이틀 생략: {e}\n")
+    preset = preset or ENCODE_PRESET
+    crf = ENCODE_CRF if crf is None else crf
+    max_height = MAX_HEIGHT if max_height is None else max_height
 
-    # 비디오 필터 체인 구성: 다운스케일(상한 초과 시) → 타이틀 순서
-    filters = []
-    if MAX_HEIGHT:
-        # 높이가 MAX_HEIGHT를 넘을 때만 축소(확대 안 함). 폭은 짝수 자동.
-        filters.append(f"scale=-2:'min(ih,{MAX_HEIGHT})'")
-    if drawtext:
-        filters.append(drawtext)
-    vf = ",".join(filters) if filters else None
+    vf = None
+    if not copy_mode:
+        title = title if title is not None else TITLE_TEXT
+        drawtext = None
+        if (title or "").strip():
+            # 폰트를 작업폴더에 복사해 콜론 없는 상대경로(cwd 기준)로 참조한다.
+            try:
+                shutil.copyfile(TITLE_FONT, workdir / "title_font.ttf")
+                drawtext = _drawtext_filter(title, "title_font.ttf")
+            except Exception as e:
+                sys.stderr.write(f"타이틀 폰트 로드 실패, 타이틀 생략: {e}\n")
+        # 비디오 필터 체인: 다운스케일(상한 초과 시) → 타이틀 순서
+        filters = []
+        if max_height:
+            filters.append(f"scale=-2:'min(ih,{max_height})'")
+        if drawtext:
+            filters.append(drawtext)
+        vf = ",".join(filters) if filters else None
 
+    total = len(segments)
     clip_paths = []
     for i, seg in enumerate(segments):
         start = max(0.0, seg["peak"] - PRE_SEC)
@@ -391,15 +427,20 @@ def build_output(video, segments, out_path, workdir, title=None):
         clip = workdir / f"clip{i:03d}.mp4"
         cmd = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", video,
                "-t", f"{dur:.2f}"]
-        if vf:
-            cmd += ["-vf", vf]
-        cmd += ["-c:v", "libx264", "-preset", ENCODE_PRESET,
-                "-crf", str(ENCODE_CRF), "-c:a", "aac",
-                "-avoid_negative_ts", "make_zero",
-                str(clip), "-loglevel", "error"]
+        if copy_mode:
+            cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+        else:
+            if vf:
+                cmd += ["-vf", vf]
+            cmd += ["-c:v", "libx264", "-preset", preset,
+                    "-crf", str(crf), "-c:a", "aac",
+                    "-avoid_negative_ts", "make_zero"]
+        cmd += [str(clip), "-loglevel", "error"]
         # cwd=workdir: drawtext가 title_font.ttf 를 상대경로로 찾도록
         run(cmd, cwd=str(workdir))
         clip_paths.append(clip)
+        if on_progress:
+            on_progress(i + 1, total)
 
     listfile = workdir / "concat.txt"
     # concat 데모서는 백슬래시를 이스케이프 문자로 해석하므로 Windows에서도
@@ -465,6 +506,11 @@ def main():
                     help=f"비전 호출 병렬 수 (기본 {VISION_WORKERS}, 범위 1~8 권장)")
     ap.add_argument("--title", default=TITLE_TEXT,
                     help="영상 우상단에 넣을 타이틀 텍스트 (예: '한울타리 FC 경기영상')")
+    ap.add_argument("--sensitivity", choices=list(SENSITIVITY_PRESETS),
+                    default="normal",
+                    help="후보 검출 민감도: more(많이)/normal(보통)/strict(엄선)")
+    ap.add_argument("--quality", choices=list(QUALITY_PRESETS), default="balanced",
+                    help="출력 품질: size/balanced/quality/copy")
     ap.add_argument("--save-json", metavar="PATH", default=None,
                     help="후보/비전 판별 결과를 JSON으로 저장 (재선택용)")
     ap.add_argument("--from-json", metavar="PATH", default=None,
@@ -506,8 +552,10 @@ def main():
                 return
             print(f"[생성] 클립 병합 -> {args.output}")
             selected.sort(key=lambda x: x["peak"])
+            qk = QUALITY_PRESETS[args.quality]
             build_output(video, selected, os.path.abspath(args.output), workdir,
-                         title=args.title)
+                         title=args.title, preset=qk.get("preset"),
+                         crf=qk.get("crf"), copy_mode=qk.get("copy", False))
             print(f"      완료: {args.output}")
             return
 
@@ -519,8 +567,10 @@ def main():
         dur = probe_duration(video)
         print(f"      {dur:.1f}초")
 
-        print(f"[2/4] 오디오 볼륨 급증 후보 검출...")
-        cands = detect_spikes(video, workdir)
+        print(f"[2/4] 오디오 볼륨 급증 후보 검출... (민감도: {args.sensitivity})")
+        sp = SENSITIVITY_PRESETS[args.sensitivity]
+        cands = detect_spikes(video, workdir, percentile=sp["percentile"],
+                              min_db=sp["min_db"])
         print(f"      {len(cands)}개 후보:")
         for i, c in enumerate(cands):
             print(f"        #{i+1:2d}  peak@{c['peak']:6.1f}s  +{c['delta_db']:4.1f}dB")
@@ -572,10 +622,12 @@ def main():
             print("\n채택된 구간이 없습니다. --conf 를 낮추거나 --no-vision 으로 시도하세요.")
             return
 
-        print(f"[4/4] 클립 생성 및 병합 -> {args.output}")
+        print(f"[4/4] 클립 생성 및 병합 -> {args.output} (품질: {args.quality})")
         selected.sort(key=lambda x: x["peak"])
+        qk = QUALITY_PRESETS[args.quality]
         build_output(video, selected, os.path.abspath(args.output), workdir,
-                     title=args.title)
+                     title=args.title, preset=qk.get("preset"),
+                     crf=qk.get("crf"), copy_mode=qk.get("copy", False))
         print(f"      완료: {args.output}")
 
     finally:

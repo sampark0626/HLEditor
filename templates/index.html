@@ -61,6 +61,18 @@
   .disabled-card { opacity:.45; pointer-events:none; }
   video { width:100%; border-radius:8px; margin-top:12px; background:#000; }
   code { background:#0d1117; padding:1px 6px; border-radius:4px; font-size:12px; }
+  select { background:#0d1117; border:1px solid var(--line); color:var(--txt);
+           border-radius:7px; padding:8px 10px; font-size:13px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg button { background:#0d1117; color:var(--muted); border:none; border-right:1px solid var(--line);
+                padding:8px 14px; font-weight:600; border-radius:0; }
+  .seg button:last-child { border-right:none; }
+  .seg button.on { background:var(--blue); color:#fff; }
+  .progress { display:none; margin-top:12px; }
+  .progress.show { display:block; }
+  .bar { height:8px; background:#0d1117; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0%; background:var(--blue); transition:width .3s; }
+  .progress .ptxt { font-size:12px; color:var(--muted); margin-top:5px; }
   .check { color:var(--accent); font-weight:700; margin-left:8px; opacity:0;
            transition:opacity .2s; }
   .check.show { opacity:1; }
@@ -91,7 +103,15 @@
       <button class="ghost" id="btn-browse">찾아보기…</button>
       <button id="btn-detect">후보 검출</button>
     </div>
-    <div class="hint">먼저 오디오 볼륨이 튀는 구간만 빠르게 찾습니다. 후보가 너무 많으면(30분 영상 100+) 비전 비용이 커지니 참고하세요.</div>
+    <div class="row" style="margin-top:10px">
+      <span class="hint" style="margin:0">감지 민감도</span>
+      <span class="seg" id="sens">
+        {% for k, v in sensitivities.items() %}
+        <button data-sens="{{ k }}" class="{{ 'on' if k=='normal' else '' }}">{{ v.label }}</button>
+        {% endfor %}
+      </span>
+    </div>
+    <div class="hint">환호·함성이 얼마나 크게 터져야 후보로 잡을지 정합니다. <b>많이 잡기</b>=놓침↓·비전비용↑, <b>엄선</b>=확실한 순간만·저렴.</div>
     <div id="detect-info"></div>
   </div>
 
@@ -106,6 +126,7 @@
       {% if not has_key %}<span class="err">⚠ GEMINI_API_KEY 없음 (.env 확인)</span>{% endif %}
     </div>
     <div class="hint">각 후보 구간의 프레임을 Gemini에 보내 하이라이트 여부를 판단합니다. 결과는 <code>results.json</code>에 자동 저장됩니다.</div>
+    <div class="progress" id="prog-classify"><div class="bar"><i></i></div><div class="ptxt"></div></div>
     <div id="usage-info" class="hint" style="margin-top:10px"></div>
   </div>
 
@@ -136,9 +157,17 @@
         <input type="text" id="title" value="한울타리 FC 경기영상" placeholder="비우면 타이틀 없음" style="flex:1;min-width:200px"></label>
     </div>
     <div class="row" style="margin-top:10px">
-      <input type="text" id="output" value="highlights.mp4" style="flex:0 0 240px">
+      <label class="hint" style="margin:0">품질
+        <select id="quality">
+          {% for k, v in qualities.items() %}
+          <option value="{{ k }}" {{ 'selected' if k=='balanced' else '' }}>{{ v.label }}</option>
+          {% endfor %}
+        </select></label>
+      <input type="text" id="output" value="highlights.mp4" style="flex:0 0 220px">
       <button id="btn-build">영상 생성</button>
     </div>
+    <div class="hint">용량은 CRF가, 속도는 preset이 좌우합니다. <b>균형</b>이 기본이며, 더 작게 하려면 <b>용량 우선</b>, 가장 빠르게는 <b>초고속(무손실 복사·타이틀 없음)</b>.</div>
+    <div class="progress" id="prog-build"><div class="bar"><i></i></div><div class="ptxt"></div></div>
     <div id="build-info"></div>
     <video id="preview" controls style="display:none"></video>
   </div>
@@ -154,6 +183,34 @@
 <script>
 const $ = s => document.querySelector(s);
 let visionDone = false;
+let sensitivity = "normal";
+
+// 감지 민감도 세그먼트 버튼
+document.querySelectorAll("#sens button").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll("#sens button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    sensitivity = b.dataset.sens;
+  };
+});
+
+// 진행 상태 폴링: stage('classify'|'build')가 일치하는 동안 바를 갱신
+function startProgress(stage, elId, labelFn) {
+  const box = $(elId); box.classList.add("show");
+  box.querySelector("i").style.width = "0%";
+  box.querySelector(".ptxt").textContent = "";
+  const timer = setInterval(async () => {
+    try {
+      const p = await (await fetch("/api/progress")).json();
+      if (p.stage === stage && p.total > 0) {
+        const pct = Math.round(p.done / p.total * 100);
+        box.querySelector("i").style.width = pct + "%";
+        box.querySelector(".ptxt").textContent = labelFn(p.done, p.total, pct);
+      }
+    } catch(e) {}
+  }, 700);
+  return () => { clearInterval(timer); box.classList.remove("show"); };
+}
 
 function setStatus(msg, cls="") { $("#status").innerHTML = msg ? `<span class="${cls}">${msg}</span>` : ""; }
 function busy(msg) { setStatus(`<span class="spin"></span>${msg}`); }
@@ -208,9 +265,9 @@ $("#btn-detect").onclick = async () => {
   const video = $("#video").value.trim();
   if (!video) return setStatus("영상 경로를 입력하세요.", "err");
   busy("오디오 분석 중…");
-  logLine("① 후보 검출 시작: " + video, "start");
+  logLine(`① 후보 검출 시작 (민감도: ${sensitivity}): ${video}`, "start");
   try {
-    const d = await api("/api/detect", {video});
+    const d = await api("/api/detect", {video, sensitivity});
     $("#detect-info").innerHTML =
       `<div class="hint ok">길이 ${d.duration}s · 후보 <b>${d.count}개</b> 검출됨</div>`;
     visionDone = false;
@@ -231,6 +288,8 @@ $("#btn-classify").onclick = async () => {
   logLine(`② 비전 판별 시작 (병렬 ${workers}개)…`, "start");
   $("#btn-classify").disabled = true;
   $("#btn-cancel").style.display = "inline-block";
+  const stopProg = startProgress("classify", "#prog-classify",
+    (d,t,p) => `비전 판별 ${d}/${t} (${p}%)`);
   try {
     const d = await api("/api/classify", {conf, workers});
     visionDone = true;
@@ -254,7 +313,7 @@ $("#btn-classify").onclick = async () => {
     if (d.n_failed > 0)
       logLine(`⚠ ${d.n_failed}개 후보는 오류로 판별 실패(제외 처리). 다시 시도하면 보강됩니다.`, "fail");
   } catch(e){ setStatus(e.message, "err"); logLine("② 비전 판별 실패: " + e.message, "fail"); }
-  finally { $("#btn-classify").disabled = false; $("#btn-cancel").style.display = "none"; }
+  finally { stopProg(); $("#btn-classify").disabled = false; $("#btn-cancel").style.display = "none"; }
 };
 
 $("#btn-cancel").onclick = async () => {
@@ -280,10 +339,14 @@ $("#btn-build").onclick = async () => {
   const conf = parseFloat($("#conf").value);
   const output = $("#output").value.trim() || "highlights.mp4";
   const title = $("#title").value.trim();
+  const quality = $("#quality").value;
   busy("클립 분할·병합 중… 채택 구간이 많으면 시간이 걸립니다.");
-  logLine(`④ 영상 생성 시작 → ${output}${title?` (제목: ${title})`:""}`, "start");
+  logLine(`④ 영상 생성 시작 → ${output} (품질: ${quality}${title?`, 제목: ${title}`:""})`, "start");
+  $("#btn-build").disabled = true;
+  const stopProg = startProgress("build", "#prog-build",
+    (d,t,p) => `클립 인코딩 ${d}/${t} (${p}%)`);
   try {
-    const d = await api("/api/build", {conf, output, title});
+    const d = await api("/api/build", {conf, output, title, quality});
     $("#build-info").innerHTML = `<div class="hint ok">완료: <code>${d.output}</code> (${d.n}개 구간)</div>`;
     const v = $("#preview"); v.src = "/api/preview?t=" + Date.now();
     v.style.display = "block";
@@ -291,6 +354,7 @@ $("#btn-build").onclick = async () => {
     setStatus("영상 생성 완료 ✓", "ok");
     logLine(`④ 영상 생성 완료 — ${d.n}개 구간, ${d.output}`, "done");
   } catch(e){ setStatus(e.message, "err"); logLine("④ 영상 생성 실패: " + e.message, "fail"); }
+  finally { stopProg(); $("#btn-build").disabled = false; }
 };
 </script>
 </body>

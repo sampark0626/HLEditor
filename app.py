@@ -51,6 +51,20 @@ SESSION = {
     "usage": None,       # 마지막 비전 판별 토큰/비용 요약
 }
 CANCEL = threading.Event()  # 비전 판별 중단 신호
+
+# 진행 상태(프로그레스 바용). UI가 /api/progress 로 폴링한다.
+PROGRESS = {"stage": None, "done": 0, "total": 0}
+_PLOCK = threading.Lock()
+
+
+def set_progress(stage, done, total):
+    with _PLOCK:
+        PROGRESS.update({"stage": stage, "done": done, "total": total})
+
+
+def clear_progress():
+    with _PLOCK:
+        PROGRESS.update({"stage": None, "done": 0, "total": 0})
 _LOCK = threading.Lock()  # classify/build 같은 장시간 작업 직렬화
 
 
@@ -115,7 +129,9 @@ def index():
     return render_template("index.html",
                            conf_auto=sh.CONF_AUTO,
                            workers=sh.VISION_WORKERS,
-                           has_key=bool(load_api_key()))
+                           has_key=bool(load_api_key()),
+                           sensitivities=sh.SENSITIVITY_PRESETS,
+                           qualities=sh.QUALITY_PRESETS)
 
 
 @app.route("/api/browse", methods=["POST"])
@@ -139,8 +155,11 @@ def api_browse():
 
 @app.route("/api/detect", methods=["POST"])
 def api_detect():
-    video = (request.json or {}).get("video", "").strip().strip('"')
-    log.info("DETECT 요청: video=%r", video)
+    body = request.json or {}
+    video = body.get("video", "").strip().strip('"')
+    sens = body.get("sensitivity", "normal")
+    sp = sh.SENSITIVITY_PRESETS.get(sens, sh.SENSITIVITY_PRESETS["normal"])
+    log.info("DETECT 요청: video=%r, 민감도=%s", video, sens)
     if not video or not os.path.exists(video):
         log.warning("DETECT 실패: 파일 없음 %r", video)
         return jsonify({"error": f"파일을 찾을 수 없습니다: {video}"}), 400
@@ -149,11 +168,13 @@ def api_detect():
             video = os.path.abspath(video)
             wd = fresh_workdir()
             dur = sh.probe_duration(video)
-            cands = sh.detect_spikes(video, wd)
+            cands = sh.detect_spikes(video, wd, percentile=sp["percentile"],
+                                     min_db=sp["min_db"])
             SESSION.update({"video": video, "duration": dur,
                             "candidates": cands, "vision_used": False,
                             "output": None})
-            log.info("DETECT 완료: %.1fs, 후보 %d개", dur, len(cands))
+            log.info("DETECT 완료: %.1fs, 후보 %d개 (민감도 %s)",
+                     dur, len(cands), sens)
             return jsonify({
                 "video": video,
                 "duration": round(dur, 1),
@@ -178,6 +199,7 @@ def api_classify():
     if not key:
         return jsonify({"error": "GEMINI_API_KEY 가 없습니다 (.env 또는 환경변수)."}), 400
     CANCEL.clear()
+    set_progress("classify", 0, len(SESSION["candidates"]))
     with _LOCK:
         try:
             log.info("CLASSIFY 시작: 후보 %d개, workers=%d",
@@ -187,7 +209,8 @@ def api_classify():
             wd = Path(SESSION["workdir"])
             usage = sh.classify_all_parallel(
                 SESSION["candidates"], SESSION["video"], wd, client, conf,
-                workers, should_cancel=CANCEL.is_set)
+                workers, should_cancel=CANCEL.is_set,
+                on_progress=lambda d, t: set_progress("classify", d, t))
             SESSION["vision_used"] = True
             cost = (usage["in"] / 1e6 * sh.PRICE_IN_PER_M +
                     usage["out"] / 1e6 * sh.PRICE_OUT_PER_M)
@@ -212,6 +235,8 @@ def api_classify():
             log.exception("CLASSIFY 예외")
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
+        finally:
+            clear_progress()
 
 
 @app.route("/api/cancel", methods=["POST"])
@@ -220,6 +245,13 @@ def api_cancel():
     CANCEL.set()
     log.info("CANCEL 요청 수신")
     return jsonify({"ok": True})
+
+
+@app.route("/api/progress")
+def api_progress():
+    """현재 진행 상태 스냅샷 (프로그레스 바 폴링용)."""
+    with _PLOCK:
+        return jsonify(dict(PROGRESS))
 
 
 @app.route("/api/select", methods=["POST"])
@@ -243,21 +275,27 @@ def api_build():
     conf = float(body.get("conf", sh.CONF_AUTO))
     output = body.get("output", "highlights.mp4").strip() or "highlights.mp4"
     title = (body.get("title") or "").strip()
+    quality = body.get("quality", "balanced")
+    qk = sh.QUALITY_PRESETS.get(quality, sh.QUALITY_PRESETS["balanced"])
     if not SESSION["candidates"]:
         return jsonify({"error": "후보가 없습니다."}), 400
     selected, _ = sh.select_segments(
         SESSION["candidates"], conf, SESSION["vision_used"])
     if not selected:
         return jsonify({"error": "채택된 구간이 없습니다. 임계를 낮춰보세요."}), 400
+    set_progress("build", 0, len(selected))
     with _LOCK:
         try:
             out_path = output if os.path.isabs(output) else \
                 os.path.join(os.path.dirname(__file__), output)
             selected = sorted(selected, key=lambda x: x["peak"])
-            log.info("BUILD 시작: %d개 구간 -> %s (타이틀=%r)",
-                     len(selected), out_path, title)
+            log.info("BUILD 시작: %d개 구간 -> %s (타이틀=%r, 품질=%s)",
+                     len(selected), out_path, title, quality)
             sh.build_output(SESSION["video"], selected, out_path,
-                            Path(SESSION["workdir"]), title=title)
+                            Path(SESSION["workdir"]), title=title,
+                            preset=qk.get("preset"), crf=qk.get("crf"),
+                            copy_mode=qk.get("copy", False),
+                            on_progress=lambda d, t: set_progress("build", d, t))
             SESSION["output"] = out_path
             log.info("BUILD 완료: %s", out_path)
             return jsonify({"output": out_path, "n": len(selected)})
@@ -265,6 +303,8 @@ def api_build():
             log.exception("BUILD 예외")
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
+        finally:
+            clear_progress()
 
 
 @app.route("/api/preview")
