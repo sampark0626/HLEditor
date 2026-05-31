@@ -24,9 +24,21 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_file
 
+import logging
+
 import soccer_highlights as sh
 
 app = Flask(__name__)
+
+# 파일 + 콘솔 로깅: 진단 시 app.log 를 읽으면 단계별 요청 흐름을 추적할 수 있다.
+LOG_PATH = os.path.join(os.path.dirname(__file__), "app.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"),
+              logging.StreamHandler()],
+)
+log = logging.getLogger("hl")
 
 # 단일 사용자 로컬 도구이므로 메모리 내 단일 세션 상태로 충분하다.
 SESSION = {
@@ -36,7 +48,9 @@ SESSION = {
     "vision_used": False,
     "workdir": None,     # 오디오/프레임/클립용 임시 작업 폴더
     "output": None,      # 마지막 생성 영상 경로
+    "usage": None,       # 마지막 비전 판별 토큰/비용 요약
 }
+CANCEL = threading.Event()  # 비전 판별 중단 신호
 _LOCK = threading.Lock()  # classify/build 같은 장시간 작업 직렬화
 
 
@@ -126,7 +140,9 @@ def api_browse():
 @app.route("/api/detect", methods=["POST"])
 def api_detect():
     video = (request.json or {}).get("video", "").strip().strip('"')
+    log.info("DETECT 요청: video=%r", video)
     if not video or not os.path.exists(video):
+        log.warning("DETECT 실패: 파일 없음 %r", video)
         return jsonify({"error": f"파일을 찾을 수 없습니다: {video}"}), 400
     with _LOCK:
         try:
@@ -137,6 +153,7 @@ def api_detect():
             SESSION.update({"video": video, "duration": dur,
                             "candidates": cands, "vision_used": False,
                             "output": None})
+            log.info("DETECT 완료: %.1fs, 후보 %d개", dur, len(cands))
             return jsonify({
                 "video": video,
                 "duration": round(dur, 1),
@@ -145,6 +162,7 @@ def api_detect():
                 "vision_used": False,
             })
         except Exception as e:
+            log.exception("DETECT 예외")
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
@@ -159,22 +177,49 @@ def api_classify():
     key = load_api_key()
     if not key:
         return jsonify({"error": "GEMINI_API_KEY 가 없습니다 (.env 또는 환경변수)."}), 400
+    CANCEL.clear()
     with _LOCK:
         try:
+            log.info("CLASSIFY 시작: 후보 %d개, workers=%d",
+                     len(SESSION["candidates"]), workers)
             from google import genai
             client = genai.Client(api_key=key)
             wd = Path(SESSION["workdir"])
-            sh.classify_all_parallel(SESSION["candidates"], SESSION["video"],
-                                     wd, client, conf, workers)
+            usage = sh.classify_all_parallel(
+                SESSION["candidates"], SESSION["video"], wd, client, conf,
+                workers, should_cancel=CANCEL.is_set)
             SESSION["vision_used"] = True
+            cost = (usage["in"] / 1e6 * sh.PRICE_IN_PER_M +
+                    usage["out"] / 1e6 * sh.PRICE_OUT_PER_M)
+            usage["cost_usd"] = round(cost, 4)
+            SESSION["usage"] = usage
             # 재선택/재현용으로 자동 저장
             sh.save_results(os.path.join(os.path.dirname(__file__), "results.json"),
                             SESSION["video"], SESSION["duration"],
                             SESSION["candidates"], True)
-            return jsonify({"candidates": serialize(conf), "vision_used": True})
+            n_hl = sum(1 for c in SESSION["candidates"] if c.get("highlight"))
+            n_failed = sum(1 for c in SESSION["candidates"]
+                           if str(c.get("reason", "")).startswith(("api_error",
+                                                                    "frame_error")))
+            log.info("CLASSIFY %s: 판별 %d/%d, 하이라이트 %d개, 실패 %d개, "
+                     "토큰 in=%d out=%d ≈ $%.4f",
+                     "취소됨" if usage.get("cancelled") else "완료",
+                     usage["classified"], usage["total"], n_hl, n_failed,
+                     usage["in"], usage["out"], cost)
+            return jsonify({"candidates": serialize(conf), "vision_used": True,
+                            "n_failed": n_failed, "usage": usage})
         except Exception as e:
+            log.exception("CLASSIFY 예외")
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/cancel", methods=["POST"])
+def api_cancel():
+    """진행 중인 비전 판별을 중단 요청 (이미 시작된 호출은 마무리됨)."""
+    CANCEL.set()
+    log.info("CANCEL 요청 수신")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/select", methods=["POST"])
@@ -197,6 +242,7 @@ def api_build():
     body = request.json or {}
     conf = float(body.get("conf", sh.CONF_AUTO))
     output = body.get("output", "highlights.mp4").strip() or "highlights.mp4"
+    title = (body.get("title") or "").strip()
     if not SESSION["candidates"]:
         return jsonify({"error": "후보가 없습니다."}), 400
     selected, _ = sh.select_segments(
@@ -208,11 +254,15 @@ def api_build():
             out_path = output if os.path.isabs(output) else \
                 os.path.join(os.path.dirname(__file__), output)
             selected = sorted(selected, key=lambda x: x["peak"])
+            log.info("BUILD 시작: %d개 구간 -> %s (타이틀=%r)",
+                     len(selected), out_path, title)
             sh.build_output(SESSION["video"], selected, out_path,
-                            Path(SESSION["workdir"]))
+                            Path(SESSION["workdir"]), title=title)
             SESSION["output"] = out_path
+            log.info("BUILD 완료: %s", out_path)
             return jsonify({"output": out_path, "n": len(selected)})
         except Exception as e:
+            log.exception("BUILD 예외")
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 

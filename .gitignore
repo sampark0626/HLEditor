@@ -34,5 +34,9 @@ logs/
 # Generated media / results
 highlights*.mp4
 test_clip.mp4
+*_test.mp4
+ui_*.mp4
 results*.json
 *.wav
+*.png
+app.log

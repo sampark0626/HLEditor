@@ -61,6 +61,18 @@
   .disabled-card { opacity:.45; pointer-events:none; }
   video { width:100%; border-radius:8px; margin-top:12px; background:#000; }
   code { background:#0d1117; padding:1px 6px; border-radius:4px; font-size:12px; }
+  .check { color:var(--accent); font-weight:700; margin-left:8px; opacity:0;
+           transition:opacity .2s; }
+  .check.show { opacity:1; }
+  #logpanel { background:#0d1117; border:1px solid var(--line); border-radius:8px;
+              padding:12px 14px; margin-top:14px; font-family:Consolas,monospace;
+              font-size:12.5px; max-height:220px; overflow-y:auto; }
+  #logpanel .ln { padding:2px 0; border-bottom:1px solid #161b22; white-space:pre-wrap; }
+  #logpanel .t { color:var(--muted); }
+  #logpanel .start { color:var(--blue); }
+  #logpanel .done { color:var(--accent); }
+  #logpanel .fail { color:#f85149; }
+  #logpanel .empty { color:var(--muted); }
 </style>
 </head>
 <body>
@@ -73,7 +85,7 @@
 
   <!-- STEP 1 -->
   <div class="card" id="card-detect">
-    <h2><span class="step-num">1</span>영상 선택 & 후보 검출 <span style="color:var(--muted);font-weight:400">(무료, API 호출 없음)</span></h2>
+    <h2><span class="step-num">1</span>영상 선택 & 후보 검출 <span style="color:var(--muted);font-weight:400">(무료, API 호출 없음)</span><span class="check" id="chk1">✓ 완료</span></h2>
     <div class="row">
       <input type="text" id="video" placeholder="경기 영상 파일 경로 (예: C:\videos\match.mp4)">
       <button class="ghost" id="btn-browse">찾아보기…</button>
@@ -85,14 +97,16 @@
 
   <!-- STEP 2 -->
   <div class="card disabled-card" id="card-classify">
-    <h2><span class="step-num">2</span>Gemini 비전 판별 <span style="color:var(--muted);font-weight:400">(병렬 · 가장 오래 걸리는 단계)</span></h2>
+    <h2><span class="step-num">2</span>Gemini 비전 판별 <span style="color:var(--muted);font-weight:400">(병렬 · 가장 오래 걸리는 단계)</span><span class="check" id="chk2">✓ 완료</span></h2>
     <div class="row">
       <label class="hint" style="margin:0">병렬 수
         <input type="number" id="workers" min="1" max="8" value="{{ workers }}"></label>
       <button id="btn-classify">비전 판별 실행</button>
+      <button id="btn-cancel" class="ghost" style="display:none;background:#7d2230">■ 중단</button>
       {% if not has_key %}<span class="err">⚠ GEMINI_API_KEY 없음 (.env 확인)</span>{% endif %}
     </div>
     <div class="hint">각 후보 구간의 프레임을 Gemini에 보내 하이라이트 여부를 판단합니다. 결과는 <code>results.json</code>에 자동 저장됩니다.</div>
+    <div id="usage-info" class="hint" style="margin-top:10px"></div>
   </div>
 
   <!-- STEP 3 -->
@@ -116,8 +130,12 @@
 
   <!-- STEP 4 -->
   <div class="card disabled-card" id="card-build">
-    <h2><span class="step-num">4</span>하이라이트 영상 생성</h2>
+    <h2><span class="step-num">4</span>하이라이트 영상 생성<span class="check" id="chk4">✓ 완료</span></h2>
     <div class="row">
+      <label class="hint" style="margin:0">제목(우상단)
+        <input type="text" id="title" value="한울타리 FC 경기영상" placeholder="비우면 타이틀 없음" style="flex:1;min-width:200px"></label>
+    </div>
+    <div class="row" style="margin-top:10px">
       <input type="text" id="output" value="highlights.mp4" style="flex:0 0 240px">
       <button id="btn-build">영상 생성</button>
     </div>
@@ -126,6 +144,11 @@
   </div>
 
   <div id="status"></div>
+
+  <div class="card" style="margin-top:18px">
+    <h2>진행 로그</h2>
+    <div id="logpanel"><div class="ln empty">아직 실행한 작업이 없습니다.</div></div>
+  </div>
 </div>
 
 <script>
@@ -135,6 +158,19 @@ let visionDone = false;
 function setStatus(msg, cls="") { $("#status").innerHTML = msg ? `<span class="${cls}">${msg}</span>` : ""; }
 function busy(msg) { setStatus(`<span class="spin"></span>${msg}`); }
 function enable(id) { $(id).classList.remove("disabled-card"); }
+function mark(id, on=true) { $(id).classList.toggle("show", on); }
+
+let logStarted = false;
+function logLine(msg, kind="") {
+  const p = $("#logpanel");
+  if (!logStarted) { p.innerHTML = ""; logStarted = true; }
+  const t = new Date().toLocaleTimeString("ko-KR", {hour12:false});
+  const div = document.createElement("div");
+  div.className = "ln " + kind;
+  div.innerHTML = `<span class="t">[${t}]</span> ${msg}`;
+  p.appendChild(div);
+  p.scrollTop = p.scrollHeight;
+}
 
 async function api(path, body) {
   const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
@@ -166,12 +202,13 @@ function renderTable(cands) {
 $("#btn-browse").onclick = async () => {
   busy("파일 선택 창을 여는 중… (작업표시줄 확인)");
   try { const d = await api("/api/browse"); if (d.path) $("#video").value = d.path; setStatus(""); }
-  catch(e){ setStatus(e.message, "err"); }
+  catch(e){ setStatus(e.message, "err"); logLine("파일 선택 실패: " + e.message, "fail"); }
 };
 $("#btn-detect").onclick = async () => {
   const video = $("#video").value.trim();
   if (!video) return setStatus("영상 경로를 입력하세요.", "err");
   busy("오디오 분석 중…");
+  logLine("① 후보 검출 시작: " + video, "start");
   try {
     const d = await api("/api/detect", {video});
     $("#detect-info").innerHTML =
@@ -180,8 +217,10 @@ $("#btn-detect").onclick = async () => {
     renderTable(d.candidates);
     enable("#card-classify"); enable("#card-select");
     $("#card-build").classList.add("disabled-card");
+    mark("#chk1", true); mark("#chk2", false); mark("#chk4", false);
     setStatus("후보 검출 완료. 비전 판별을 진행하세요.", "ok");
-  } catch(e){ setStatus(e.message, "err"); }
+    logLine(`① 후보 검출 완료 — 길이 ${d.duration}s, 후보 ${d.count}개`, "done");
+  } catch(e){ setStatus(e.message, "err"); logLine("① 후보 검출 실패: " + e.message, "fail"); }
 };
 
 // STEP 2
@@ -189,13 +228,40 @@ $("#btn-classify").onclick = async () => {
   const conf = parseFloat($("#conf").value);
   const workers = parseInt($("#workers").value)||6;
   busy("Gemini 비전 판별 중… 후보 수에 따라 수 분 걸릴 수 있습니다.");
+  logLine(`② 비전 판별 시작 (병렬 ${workers}개)…`, "start");
+  $("#btn-classify").disabled = true;
+  $("#btn-cancel").style.display = "inline-block";
   try {
     const d = await api("/api/classify", {conf, workers});
     visionDone = true;
     renderTable(d.candidates);
     enable("#card-build");
-    setStatus("비전 판별 완료. 슬라이더로 임계를 조정하거나 바로 영상을 생성하세요.", "ok");
-  } catch(e){ setStatus(e.message, "err"); }
+    mark("#chk2", true);
+    const auto = d.candidates.filter(c=>c.flag==="auto").length;
+    const hl = d.candidates.filter(c=>c.highlight).length;
+    const u = d.usage || {};
+    if (u.in !== undefined) {
+      $("#usage-info").innerHTML =
+        `토큰 입력 ${u.in.toLocaleString()} · 출력 ${u.out.toLocaleString()} · ${u.calls}회 호출 · 예상 <b>$${u.cost_usd}</b>`;
+    }
+    if (u.cancelled) {
+      setStatus(`중단됨 — ${u.classified}/${u.total}개만 판별되었습니다.`, "ok");
+      logLine(`② 비전 판별 중단 — ${u.classified}/${u.total}개 판별, 예상 $${u.cost_usd}`, "fail");
+    } else {
+      setStatus("비전 판별 완료. 슬라이더로 임계를 조정하거나 바로 영상을 생성하세요.", "ok");
+      logLine(`② 비전 판별 완료 — 하이라이트 ${hl}개, 채택 ${auto}개, 예상 $${u.cost_usd}`, "done");
+    }
+    if (d.n_failed > 0)
+      logLine(`⚠ ${d.n_failed}개 후보는 오류로 판별 실패(제외 처리). 다시 시도하면 보강됩니다.`, "fail");
+  } catch(e){ setStatus(e.message, "err"); logLine("② 비전 판별 실패: " + e.message, "fail"); }
+  finally { $("#btn-classify").disabled = false; $("#btn-cancel").style.display = "none"; }
+};
+
+$("#btn-cancel").onclick = async () => {
+  $("#btn-cancel").disabled = true;
+  logLine("② 중단 요청 — 진행 중인 호출만 마무리 후 멈춥니다…", "fail");
+  try { await api("/api/cancel"); } catch(e){}
+  $("#btn-cancel").disabled = false;
 };
 
 // STEP 3 — conf slider live reselect
@@ -213,14 +279,18 @@ $("#conf").oninput = () => {
 $("#btn-build").onclick = async () => {
   const conf = parseFloat($("#conf").value);
   const output = $("#output").value.trim() || "highlights.mp4";
+  const title = $("#title").value.trim();
   busy("클립 분할·병합 중… 채택 구간이 많으면 시간이 걸립니다.");
+  logLine(`④ 영상 생성 시작 → ${output}${title?` (제목: ${title})`:""}`, "start");
   try {
-    const d = await api("/api/build", {conf, output});
+    const d = await api("/api/build", {conf, output, title});
     $("#build-info").innerHTML = `<div class="hint ok">완료: <code>${d.output}</code> (${d.n}개 구간)</div>`;
     const v = $("#preview"); v.src = "/api/preview?t=" + Date.now();
     v.style.display = "block";
+    mark("#chk4", true);
     setStatus("영상 생성 완료 ✓", "ok");
-  } catch(e){ setStatus(e.message, "err"); }
+    logLine(`④ 영상 생성 완료 — ${d.n}개 구간, ${d.output}`, "done");
+  } catch(e){ setStatus(e.message, "err"); logLine("④ 영상 생성 실패: " + e.message, "fail"); }
 };
 </script>
 </body>

@@ -23,9 +23,11 @@ soccer_highlights.py
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
+import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -51,17 +53,49 @@ FRAME_INTERVAL = 0.5    # 비전 판별용 프레임 추출 간격 (초)
 MAX_FRAMES     = 8      # 후보당 Gemini에 보낼 최대 프레임 수
 VISION_MODEL   = "gemini-2.5-flash"   # 비용/속도 균형. 정확도 더 원하면 gemini-2.5-pro
 VISION_WORKERS = 6      # 비전 호출 동시 병렬 수 (Gemini rate limit 고려해 4~8 권장)
+VISION_RETRIES = 4      # 503/429 등 일시적 오류 시 후보당 최대 재시도 횟수
+RETRY_BASE_SEC = 2.0    # 재시도 지수 백오프 기준 (2,4,8,... 초 + 지터)
 CONF_AUTO      = 0.70   # 이 신뢰도 이상이면 자동 채택
 CONF_MAYBE     = 0.40   # 이 값 이상 ~ AUTO 미만이면 '확인 필요'로 분류
 
+SPAWN_RETRIES  = 4      # ffmpeg 프로세스 생성 실패(WinError 5 등) 시 재시도 횟수
+
+# --- 타이틀 워터마크 (영상 우상단 작은 제목) ---
+TITLE_TEXT     = ""     # 비우면 타이틀 없음. 예: "한울타리 FC 경기영상"
+TITLE_FONT     = r"C:\Windows\Fonts\NanumGothic.ttf"  # 한글 지원 폰트
+TITLE_FONTSIZE = 22
+TITLE_MARGIN   = 24     # 우/상단 여백 (px)
+
+# --- Gemini 2.5 Flash 단가 (USD per 1M tokens, 2025 기준 추정) ---
+PRICE_IN_PER_M  = 0.30
+PRICE_OUT_PER_M = 2.50
+
 
 # ----------------------------------------------------------------------------
-def run(cmd):
-    """ffmpeg/ffprobe 실행 헬퍼."""
-    # encoding/errors 명시: Windows 한글 로케일(cp949)에서 ffmpeg의 비-cp949
-    # stderr 출력을 디코딩하다 UnicodeDecodeError로 죽는 것을 방지한다.
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+def run(cmd, cwd=None):
+    """ffmpeg/ffprobe 실행 헬퍼.
+
+    Windows에서 여러 ffmpeg를 동시에 spawn할 때 간헐적으로 발생하는
+    PermissionError([WinError 5])는 일시적이므로 짧게 재시도한다.
+    cwd: 지정 시 해당 디렉터리에서 실행 (drawtext 폰트를 콜론 없는 상대경로로
+         참조하기 위해 사용).
+    """
+    last_exc = None
+    for attempt in range(SPAWN_RETRIES):
+        try:
+            # encoding/errors 명시: Windows 한글 로케일(cp949)에서 ffmpeg의 비-cp949
+            # stderr 출력을 디코딩하다 UnicodeDecodeError로 죽는 것을 방지한다.
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
+                               cwd=cwd)
+            break
+        except (PermissionError, OSError) as e:
+            last_exc = e
+            if attempt == SPAWN_RETRIES - 1:
+                raise
+            time.sleep(0.5 * (2 ** attempt) + random.uniform(0, 0.3))
+    else:  # pragma: no cover
+        raise last_exc
     if r.returncode != 0:
         sys.stderr.write(r.stderr or "")
         raise RuntimeError(f"command failed: {' '.join(cmd[:3])}...")
@@ -164,8 +198,23 @@ VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 영상의 하
 {"highlight": true/false, "type": "goal|shot|save|attack|other", "confidence": 0.0~1.0, "reason": "한 줄 근거"}"""
 
 
+def _is_transient(exc):
+    """503/429/5xx 등 잠시 후 재시도하면 풀릴 수 있는 오류인지 판단."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 500, 502, 503, 504):
+        return True
+    msg = str(exc).upper()
+    return any(k in msg for k in ("UNAVAILABLE", "503", "429", "RESOURCE_EXHAUSTED",
+                                  "OVERLOADED", "DEADLINE", "INTERNAL"))
+
+
 def classify_with_gemini(frames, client):
-    """프레임 묶음을 Gemini에 보내 판별 결과(dict) 반환."""
+    """프레임 묶음을 Gemini에 보내 (판별 결과 dict, 토큰 사용량 dict) 반환.
+
+    503(과부하)/429(rate limit) 같은 일시적 오류는 지수 백오프로 재시도한다.
+    재시도까지 모두 실패하면 예외를 올려 호출부(_process)가 후보 단위로 격리한다.
+    usage: {"in": 입력토큰, "out": 출력토큰}
+    """
     from google.genai import types
 
     parts = [types.Part.from_text(text=VISION_PROMPT)]
@@ -173,44 +222,96 @@ def classify_with_gemini(frames, client):
         parts.append(types.Part.from_bytes(
             data=fp.read_bytes(), mime_type="image/jpeg"))
 
-    resp = client.models.generate_content(
-        model=VISION_MODEL,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            temperature=0.1,
-            response_mime_type="application/json",
-        ),
-    )
+    last_exc = None
+    for attempt in range(VISION_RETRIES):
+        try:
+            resp = client.models.generate_content(
+                model=VISION_MODEL,
+                contents=[types.Content(role="user", parts=parts)],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                ),
+            )
+            break
+        except Exception as e:
+            last_exc = e
+            if not _is_transient(e) or attempt == VISION_RETRIES - 1:
+                raise
+            # 지수 백오프 + 지터로 동시 재시도 몰림 방지
+            delay = RETRY_BASE_SEC * (2 ** attempt) + random.uniform(0, 1)
+            print(f"        (일시적 오류, {delay:.1f}s 후 재시도 "
+                  f"{attempt+1}/{VISION_RETRIES-1}): {str(e)[:60]}")
+            time.sleep(delay)
+    else:  # pragma: no cover
+        raise last_exc
+
+    um = getattr(resp, "usage_metadata", None)
+    usage = {
+        "in": int(getattr(um, "prompt_token_count", 0) or 0),
+        "out": int(getattr(um, "candidates_token_count", 0) or 0),
+    }
     txt = resp.text.strip().replace("```json", "").replace("```", "").strip()
     try:
-        return json.loads(txt)
+        return json.loads(txt), usage
     except json.JSONDecodeError:
-        return {"highlight": False, "type": "other", "confidence": 0.0,
-                "reason": f"parse_error: {txt[:80]}"}
+        return ({"highlight": False, "type": "other", "confidence": 0.0,
+                 "reason": f"parse_error: {txt[:80]}"}, usage)
 
 
-def classify_all_parallel(cands, video, workdir, client, conf_auto, workers):
+def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
+                          should_cancel=None):
     """모든 후보에 대해 프레임 추출 + Gemini 판별을 병렬로 실행.
 
     후보 간 순서 의존성이 없으므로 ThreadPoolExecutor로 동시 처리한다.
     각 future가 완료될 때마다 결과를 즉시 출력해 진행 상황을 실시간으로 보여준다.
+
+    should_cancel: 호출하면 True를 돌려주는 콜러블. True가 되면 아직 시작되지
+        않은 작업을 취소하고 루프를 빠져나온다(진행 중인 호출은 마무리됨).
+    반환: 사용량/진행 요약 dict
+        {"in":입력토큰, "out":출력토큰, "calls":실제호출수,
+         "classified":판별완료수, "total":전체후보수, "cancelled":bool}
     """
     # 완료 순서와 무관하게 원본 인덱스(idx)를 키로 결과를 모은다
     results = {}
+    usage_total = {"in": 0, "out": 0, "calls": 0}
 
     def _process(idx, cand):
-        frames = extract_frames(video, cand["peak"], workdir, idx)
+        # 프레임 추출(ffmpeg)도 후보 단위로 격리: 한 후보의 spawn 실패가
+        # 배치 전체를 죽이지 않도록 한다.
+        try:
+            frames = extract_frames(video, cand["peak"], workdir, idx)
+        except Exception as e:
+            return idx, {"highlight": False, "type": "other", "confidence": 0.0,
+                         "reason": f"frame_error: {str(e)[:80]}"}, None
         if not frames:
             return idx, {"highlight": False, "type": "other",
-                         "confidence": 0.0, "reason": "no_frames"}
-        return idx, classify_with_gemini(frames, client)
+                         "confidence": 0.0, "reason": "no_frames"}, None
+        try:
+            res, usage = classify_with_gemini(frames, client)
+            return idx, res, usage
+        except Exception as e:
+            # 한 후보가 재시도까지 실패해도 배치 전체를 죽이지 않고 격리한다.
+            return idx, {"highlight": False, "type": "other", "confidence": 0.0,
+                         "reason": f"api_error: {str(e)[:80]}"}, None
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process, i, c): i
                    for i, c in enumerate(cands)}
         for future in as_completed(futures):
-            idx, res = future.result()
+            if should_cancel and should_cancel():
+                cancelled = True
+                for f in futures:
+                    f.cancel()  # 아직 시작 안 된 작업만 취소됨
+                print("        (사용자 취소 요청 — 진행 중인 호출만 마무리합니다)")
+                break
+            idx, res, usage = future.result()
             results[idx] = res
+            if usage:
+                usage_total["in"] += usage["in"]
+                usage_total["out"] += usage["out"]
+                usage_total["calls"] += 1
             c = cands[idx]
             conf = float(res.get("confidence", 0))
             flag = "❌"
@@ -222,23 +323,67 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers):
                   f"[{res.get('type','?'):6}] conf={conf:.2f} {flag}  "
                   f"{res.get('reason','')}")
 
-    # 원본 순서대로 결과를 cands에 반영
+    # 판별된 후보만 결과 반영 (취소된 경우 일부는 비전 결과 없음)
     for i, c in enumerate(cands):
-        c.update(results[i])
+        if i in results:
+            c.update(results[i])
+
+    usage_total.update({"classified": len(results), "total": len(cands),
+                        "cancelled": cancelled})
+    return usage_total
 
 
 # ----------------------------------------------------------------------------
-def build_output(video, segments, out_path, workdir):
-    """선택된 구간들을 잘라 이어붙여 최종 영상 생성."""
+def _drawtext_filter(title, font_name):
+    """우상단 타이틀 워터마크용 drawtext 필터 문자열 생성 (없으면 None).
+
+    font_name: 작업폴더 기준 상대 폰트 파일명(콜론 없는 경로). Windows 드라이브
+        콜론 이스케이프 문제를 피하려고 폰트를 작업폴더에 복사해 쓴다.
+    """
+    title = (title or "").strip()
+    if not title:
+        return None
+
+    def esc(s):  # drawtext text 값 이스케이프
+        return (s.replace("\\", "\\\\").replace(":", "\\:")
+                 .replace("'", "\\'").replace("%", "\\%"))
+
+    return (f"drawtext=fontfile={font_name}:text={esc(title)}:"
+            f"fontcolor=white:fontsize={TITLE_FONTSIZE}:"
+            f"x=w-tw-{TITLE_MARGIN}:y={TITLE_MARGIN}:"
+            f"box=1:boxcolor=black@0.35:boxborderw=10:"
+            f"shadowcolor=black@0.5:shadowx=1:shadowy=1")
+
+
+def build_output(video, segments, out_path, workdir, title=None):
+    """선택된 구간들을 잘라 이어붙여 최종 영상 생성.
+
+    title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
+    """
+    title = title if title is not None else TITLE_TEXT
+    vf = None
+    if (title or "").strip():
+        # 폰트를 작업폴더에 복사해 콜론 없는 상대경로(cwd 기준)로 참조한다.
+        try:
+            shutil.copyfile(TITLE_FONT, workdir / "title_font.ttf")
+            vf = _drawtext_filter(title, "title_font.ttf")
+        except Exception as e:
+            sys.stderr.write(f"타이틀 폰트 로드 실패, 타이틀 생략: {e}\n")
+
     clip_paths = []
     for i, seg in enumerate(segments):
         start = max(0.0, seg["peak"] - PRE_SEC)
         dur = PRE_SEC + POST_SEC
         clip = workdir / f"clip{i:03d}.mp4"
-        run(["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", video,
-             "-t", f"{dur:.2f}", "-c:v", "libx264", "-preset", "veryfast",
-             "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
-             str(clip), "-loglevel", "error"])
+        cmd = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", video,
+               "-t", f"{dur:.2f}"]
+        if vf:
+            cmd += ["-vf", vf]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
+                str(clip), "-loglevel", "error"]
+        # cwd=workdir: drawtext가 title_font.ttf 를 상대경로로 찾도록
+        run(cmd, cwd=str(workdir))
         clip_paths.append(clip)
 
     listfile = workdir / "concat.txt"
@@ -303,6 +448,8 @@ def main():
                     help=f"자동 채택 신뢰도 임계 (기본 {CONF_AUTO})")
     ap.add_argument("--workers", type=int, default=VISION_WORKERS,
                     help=f"비전 호출 병렬 수 (기본 {VISION_WORKERS}, 범위 1~8 권장)")
+    ap.add_argument("--title", default=TITLE_TEXT,
+                    help="영상 우상단에 넣을 타이틀 텍스트 (예: '한울타리 FC 경기영상')")
     ap.add_argument("--save-json", metavar="PATH", default=None,
                     help="후보/비전 판별 결과를 JSON으로 저장 (재선택용)")
     ap.add_argument("--from-json", metavar="PATH", default=None,
@@ -344,7 +491,8 @@ def main():
                 return
             print(f"[생성] 클립 병합 -> {args.output}")
             selected.sort(key=lambda x: x["peak"])
-            build_output(video, selected, os.path.abspath(args.output), workdir)
+            build_output(video, selected, os.path.abspath(args.output), workdir,
+                         title=args.title)
             print(f"      완료: {args.output}")
             return
 
@@ -377,7 +525,12 @@ def main():
         if use_vision:
             workers = max(1, min(args.workers, 8))
             print(f"[3/4] Gemini 비전 판별 ({VISION_MODEL}, 병렬 {workers}개)...")
-            classify_all_parallel(cands, video, workdir, client, args.conf, workers)
+            usage = classify_all_parallel(cands, video, workdir, client,
+                                          args.conf, workers)
+            cost = (usage["in"] / 1e6 * PRICE_IN_PER_M +
+                    usage["out"] / 1e6 * PRICE_OUT_PER_M)
+            print(f"      토큰: 입력 {usage['in']:,} / 출력 {usage['out']:,} "
+                  f"({usage['calls']}회 호출) ≈ ${cost:.4f}")
         else:
             print(f"[3/4] 비전 판별 생략 — 오디오 후보 전체 사용")
 
@@ -406,7 +559,8 @@ def main():
 
         print(f"[4/4] 클립 생성 및 병합 -> {args.output}")
         selected.sort(key=lambda x: x["peak"])
-        build_output(video, selected, os.path.abspath(args.output), workdir)
+        build_output(video, selected, os.path.abspath(args.output), workdir,
+                     title=args.title)
         print(f"      완료: {args.output}")
 
     finally:
