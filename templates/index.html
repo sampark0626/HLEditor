@@ -148,7 +148,16 @@ input[type=range] { flex:1; accent-color:var(--blue); }
     <div id="staged-area" style="display:none; margin-top:10px">
       <div class="ct" style="margin-bottom:6px">
         <span>추가 목록 <span id="staged-count" style="color:var(--txt)">0개</span></span>
-        <button class="ghost sm" onclick="clearStaged()">목록 초기화</button>
+        <span style="display:flex;gap:6px;align-items:center;text-transform:none;font-weight:400">
+          <span class="hint" style="text-transform:none">전체 민감도 일괄</span>
+          <select id="bulk-sens" class="sens-sel" onchange="applyBulkSens(this.value)">
+            <option value="">— 선택 —</option>
+            {% for k, v in sensitivities.items() %}
+            <option value="{{ k }}">{{ v.label }}</option>
+            {% endfor %}
+          </select>
+          <button class="ghost sm" onclick="clearStaged()">목록 초기화</button>
+        </span>
       </div>
       <div id="staged-list"></div>
     </div>
@@ -253,6 +262,9 @@ input[type=range] { flex:1; accent-color:var(--blue); }
     </div>
   </div>
 
+  <!-- 파이프라인 진행 요약 -->
+  <div id="pipeline-summary" class="q-summary" style="display:none"></div>
+
   <div class="card">
     <div class="ct">생성 설정</div>
     <div class="row" style="gap:16px; flex-wrap:wrap">
@@ -267,8 +279,16 @@ input[type=range] { flex:1; accent-color:var(--blue); }
       <button id="btn-upload-all" class="ghost" onclick="doUploadAll()"
         title="완료된 모든 영상을 YouTube에 업로드">▶ YouTube 전체 업로드</button>
     </div>
+    <div class="row" style="margin-top:8px; gap:16px; flex-wrap:wrap">
+      <label class="hint" style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="auto-upload" onchange="onAutoUploadToggle(this.checked)">
+        생성 완료 후 자동으로 YouTube 업로드
+        <span id="auto-upload-na" class="hint" style="color:var(--rej);font-size:11px"></span>
+      </label>
+    </div>
     <div class="hint" style="margin-top:5px">
       리뷰 탭에서 저장된 항목만 생성됩니다. 영상별 제목·파일명은 아래에서 수정하세요.
+      <br>YouTube 제목에는 영상명·날짜가 자동으로 덧붙어 영상별로 구분됩니다.
     </div>
   </div>
   <div id="build-list">
@@ -329,6 +349,40 @@ let ytAuth   = YT_AUTH;
 let bandAuth = BAND_AUTH;
 let bandList = [];   // [{band_key, name, member_count}]
 let bandListLoaded = false;
+let autoUpload   = false;
+let autoUploaded = new Set();   // 자동 업로드 트리거한 jid 추적
+
+// ─── localStorage 영속화 ─────────────────────────────────
+const LS = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem("hl_" + k)) ?? d; } catch(e) { return d; } },
+  set(k, v) { try { localStorage.setItem("hl_" + k, JSON.stringify(v)); } catch(e) {} },
+};
+function persistBuildData() { LS.set("buildData", buildData); }
+(function restoreState() {
+  buildData  = LS.get("buildData", {}) || {};
+  globalConf = LS.get("globalConf", CONF_AUTO);
+  autoUpload = LS.get("autoUpload", false);
+})();
+// DOM 준비 후 복원값 반영
+(function applyRestoredUI() {
+  const gc = document.getElementById("global-conf");
+  const gv = document.getElementById("gcv");
+  if (gc) gc.value = globalConf;
+  if (gv) gv.textContent = Number(globalConf).toFixed(2);
+  const au = document.getElementById("auto-upload");
+  const na = document.getElementById("auto-upload-na");
+  if (au) {
+    au.checked = autoUpload && ytAuth;
+    au.disabled = !ytAuth;
+    if (!ytAuth && na) na.textContent = "(YouTube 인증 후 사용 가능)";
+  }
+})();
+
+function onAutoUploadToggle(on) {
+  autoUpload = on;
+  LS.set("autoUpload", on);
+  if (on) logLine("생성 완료 시 자동 YouTube 업로드 켜짐", "done");
+}
 
 // ─── 알림 ───────────────────────────────────────────────
 (function initNotif() {
@@ -451,6 +505,16 @@ function setStagedSens(i, val) {
   if (staged[i]) staged[i].sensitivity = val;
 }
 
+function applyBulkSens(val) {
+  if (!val) return;
+  staged.forEach(s => s.sensitivity = val);
+  renderStaged();
+  const sel = document.getElementById("bulk-sens");
+  if (sel) sel.value = "";   // 다시 안내 상태로
+  const lbl = (SENSITIVITIES[val] || {}).label || val;
+  logLine(`전체 ${staged.length}개 민감도를 "${lbl}"로 설정`, "done");
+}
+
 function removeStaged(i) {
   staged.splice(i, 1);
   // textarea와 동기화
@@ -498,6 +562,7 @@ async function poll() {
     checkNotifications(jobs);
     allJobs = jobs;
     updateBadges();
+    checkAutoUpload();
     if (activePne === "queue")  renderQueue();
     if (activePne === "review") renderReview();
     if (activePne === "build")  renderBuild();
@@ -525,7 +590,8 @@ function updateBadges() {
 // ─── 큐 탭 렌더 ─────────────────────────────────────────
 function renderQueue() {
   const h = JSON.stringify(allJobs.map(j =>
-    [j.id, j.status, j.progress, j.n_candidates, j.elapsed_sec]));
+    [j.id, j.status, j.progress, j.n_candidates, j.elapsed_sec,
+     j.n_auto, j.n_maybe, j.n_approved]));
   if (h === lastQueueHash) return;
   lastQueueHash = h;
 
@@ -587,8 +653,15 @@ function renderQueue() {
     if (j.usage)         meta.push(`$${j.usage.cost_usd}`);
     if (j.elapsed_sec)   meta.push(`소요 ${fmtSec(j.elapsed_sec)}`);
     if (j.n_approved !== null) meta.push(`<b style="color:var(--blue)">✓ ${j.n_approved}개 저장</b>`);
+    // 하이라이트 없음 경고 (판별 완료했으나 채택/확인필요 모두 0)
+    const noHighlight = j.status === "ready" && j.vision_used
+      && !j.n_auto && !j.n_maybe;
+    if (noHighlight)
+      meta.push(`<span style="color:var(--warn)">⚠ 하이라이트 없음 — 임계 낮춰 재검토</span>`);
     const err = j.error
       ? `<div class="hint fail" style="margin-top:3px">오류: ${esc(j.error.substring(0,120))}</div>` : "";
+    const retryBtn = j.status === "error"
+      ? `<button class="ghost sm" onclick="doRetry('${j.id}')">재시도</button>` : "";
     html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -598,7 +671,9 @@ function renderQueue() {
         <div class="hint" style="margin-top:2px">${meta.join(" &middot; ")}</div>
         ${progHtml}${err}
       </div>
-      <button class="ghost sm" onclick="doDelete('${j.id}')">삭제</button>
+      <div style="display:flex;gap:6px;flex-shrink:0">${retryBtn}
+        <button class="ghost sm" onclick="doDelete('${j.id}')">삭제</button>
+      </div>
     </div>`;
   }
   el.innerHTML = html;
@@ -607,7 +682,8 @@ function renderQueue() {
 // ─── 리뷰 탭 렌더 ───────────────────────────────────────
 function renderReview() {
   const reviewable = allJobs.filter(j => ["ready","done"].includes(j.status));
-  const h = JSON.stringify(reviewable.map(j => [j.id, j.status, j.n_approved]));
+  const h = JSON.stringify(reviewable.map(j =>
+    [j.id, j.status, j.n_approved, j.n_auto, j.n_maybe]));
   if (h === lastReviewHash) return;
   lastReviewHash = h;
 
@@ -632,11 +708,13 @@ function renderReview() {
       ? `<span style="color:var(--accent);font-size:12px;white-space:nowrap">✓ ${nSaved}개 저장</span>` : "";
     const unsavedMk = nSaved === null
       ? `<span style="color:var(--warn);font-size:11px;white-space:nowrap">미저장</span>` : "";
+    const noHl = j.vision_used && !j.n_auto && !j.n_maybe;
     const meta = [
       j.duration ? fmtDur(j.duration) : "",
       `후보 ${j.n_candidates}개`,
       j.n_auto  ? `AI채택 ${j.n_auto}` : "",
       j.n_maybe ? `확인필요 ${j.n_maybe}` : "",
+      noHl ? "⚠ 하이라이트 없음" : "",
     ].filter(Boolean).join(" / ");
 
     html += `
@@ -775,6 +853,7 @@ function onJobConf(jid, val) {
 function onGlobalConf(val) {
   globalConf = parseFloat(val);
   document.getElementById("gcv").textContent = globalConf.toFixed(2);
+  LS.set("globalConf", globalConf);
 }
 
 function applyGlobalConf() {
@@ -897,11 +976,15 @@ async function bulkSaveAndBuild() {
     const ad = await post("/api/jobs/approve-all", {conf: globalConf});
     logLine(`전체 저장 완료: ${ad.total}개 영상`, "done");
 
+    let zeroCnt = 0;
     for (const item of (ad.saved || [])) {
       const j = allJobs.find(x => x.id === item.id);
       if (j) j.n_approved = item.n;
       savedSel[item.id] = [];
+      if (item.n === 0) zeroCnt++;
     }
+    if (zeroCnt)
+      logLine(`⚠ ${zeroCnt}개 영상은 채택 구간 0개 — 임계를 낮추거나 리뷰에서 직접 선택하세요`, "fail");
     updateBadges();
     lastReviewHash = "";
     lastBuildHash  = "";
@@ -917,10 +1000,13 @@ async function bulkSaveAndBuild() {
       titles[j.id]  = buildData[j.id].title;
       outputs[j.id] = buildData[j.id].output;
     });
+    persistBuildData();
 
     logLine("영상 생성 시작…", "start");
     const bd = await post("/api/jobs/build-all", {quality, titles, outputs});
     logLine(`영상 생성 진행 중: ${bd.n}개`, "done");
+    (bd.skipped || []).forEach(n =>
+      logLine(`⚠ ${n}: 채택 0개 — 생성 제외`, "fail"));
     go("build");
   } catch(e) { logLine("오류: " + e.message, "fail"); }
 }
@@ -1010,8 +1096,10 @@ function renderBuild() {
           title="${esc(j.video_name)}">${esc(j.video_name)}</td>
       <td style="font-weight:700;color:var(--accent);text-align:center">${j.n_approved}</td>
       <td><input type="text" data-bd-title="${j.id}" value="${esc(buildData[j.id].title)}"
+          onchange="onBuildField('${j.id}','title',this.value)"
           style="min-width:unset;width:150px;font-size:12px;padding:5px 7px"></td>
       <td><input type="text" data-bd-out="${j.id}" value="${esc(buildData[j.id].output)}"
+          onchange="onBuildField('${j.id}','output',this.value)"
           style="min-width:unset;width:180px;font-size:12px;padding:5px 7px"></td>
       <td style="white-space:nowrap">${stHtml}</td>
       <td style="min-width:120px">${ytHtml}</td>
@@ -1030,8 +1118,42 @@ function renderBuild() {
       <tbody>${rows}</tbody>
     </table></div></div>`;
 
-  // BAND 게시 카드 — YouTube 완료 영상이 있을 때 표시
+  // 파이프라인 진행 요약 + BAND 게시 카드
+  updatePipelineSummary(jobs);
   updateBandCard();
+}
+
+function onBuildField(jid, key, val) {
+  if (!buildData[jid]) buildData[jid] = {};
+  buildData[jid][key] = val;
+  persistBuildData();
+}
+
+function updatePipelineSummary(jobs) {
+  const el = document.getElementById("pipeline-summary");
+  if (!el) return;
+  if (!jobs.length) { el.style.display = "none"; return; }
+  el.style.display = "flex";
+
+  const builtDone = jobs.filter(j => j.status === "done" && j.output).length;
+  const building  = jobs.filter(j => j.status === "building").length;
+  const ytDone    = jobs.filter(j => j.yt_status === "done").length;
+  const ytUp      = jobs.filter(j => j.yt_status === "uploading").length;
+  const ytErr     = jobs.filter(j => j.yt_status === "error").length;
+  const bandDone  = jobs.filter(j => j.band_status === "done").length;
+
+  const parts = [];
+  parts.push(`<span>🎬 생성 <b class="qs-done">${builtDone}</b>/${jobs.length}` +
+             (building ? ` <span class="qs-proc">(생성중 ${building})</span>` : "") + `</span>`);
+  if (ytAuth) {
+    parts.push(`<span>▶ 업로드 <b class="qs-done">${ytDone}</b>/${jobs.length}` +
+               (ytUp  ? ` <span class="qs-proc">(업로드중 ${ytUp})</span>` : "") +
+               (ytErr ? ` <span style="color:var(--red)">(오류 ${ytErr})</span>` : "") + `</span>`);
+  }
+  if (bandAuth) {
+    parts.push(`<span>📣 게시 <b class="qs-done">${bandDone}</b>/${ytDone || 0}</span>`);
+  }
+  el.innerHTML = parts.join("");
 }
 
 async function doBuildAll() {
@@ -1043,6 +1165,7 @@ async function doBuildAll() {
     if (!buildData[i.dataset.bdOut]) buildData[i.dataset.bdOut] = {};
     buildData[i.dataset.bdOut].output = i.value;
   });
+  persistBuildData();
   const quality = document.getElementById("quality").value;
   const titles = {}, outputs = {};
   allJobs.forEach(j => {
@@ -1059,6 +1182,8 @@ async function doBuildAll() {
     const d = await post("/api/jobs/build-all", {quality, titles, outputs});
     if (d.error) throw new Error(d.error);
     logLine(`${d.n}개 영상 생성 진행 중…`, "done");
+    (d.skipped || []).forEach(n =>
+      logLine(`⚠ ${n}: 채택 구간 0개 — 생성 제외 (리뷰에서 구간 선택 필요)`, "fail"));
   } catch(e) {
     logLine("생성 오류: " + e.message, "fail");
   } finally {
@@ -1073,7 +1198,19 @@ async function doDelete(jid) {
   delete savedSel[jid]; delete expanded[jid];
   delete confVal[jid];  delete buildData[jid];
   delete prevStatuses[jid];
+  autoUploaded.delete(jid);
+  persistBuildData();
   lastQueueHash = ""; lastReviewHash = ""; lastBuildHash = "";
+}
+
+async function doRetry(jid) {
+  const name = allJobs.find(j => j.id === jid)?.video_name || jid;
+  try {
+    await post(`/api/jobs/${jid}/retry`, {});
+    autoUploaded.delete(jid);
+    logLine(`재시도: ${name} — 큐에 재투입`, "start");
+    lastQueueHash = ""; lastReviewHash = ""; lastBuildHash = "";
+  } catch(e) { logLine(`재시도 실패: ${e.message}`, "fail"); }
 }
 
 async function clearDone() {
@@ -1111,6 +1248,14 @@ function esc(s) {
                       .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
+// 로컬 시간대 기준 YYYY-MM-DD (toISOString의 UTC 오프바이원 방지)
+function localDateStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function logLine(msg, kind="") {
   const p = document.getElementById("logpanel");
   if (!logStarted) { p.innerHTML = ""; logStarted = true; }
@@ -1123,13 +1268,27 @@ function logLine(msg, kind="") {
 }
 
 // ─── YouTube 함수 ────────────────────────────────────────
+// 영상별로 구분되는 YouTube 제목 생성: "베이스 | 영상명 | 날짜"
+function ytTitleFor(jid, baseTitle) {
+  const j = allJobs.find(x => x.id === jid);
+  const vname = j ? j.video_name.replace(/\.[^.]+$/, "") : "";
+  const date  = (j && j.match_date) || localDateStr();
+  const base  = (baseTitle || "").trim();
+  // 베이스 제목에 이미 영상명이 들어있으면 중복 방지
+  const parts = [base];
+  if (vname && !base.includes(vname)) parts.push(vname);
+  parts.push(date);
+  return parts.filter(Boolean).join(" | ").slice(0, 100);
+}
+
 async function doUploadOne(jid) {
   if (!ytAuth) { alert("YouTube 인증이 필요합니다. 인증 버튼을 클릭하세요."); return; }
-  // 현재 입력된 제목 수집
+  // 현재 입력된 제목(워터마크 베이스) 수집
   const titleEl = document.querySelector(`[data-bd-title="${jid}"]`);
-  const title   = titleEl ? titleEl.value : (buildData[jid]?.title || "한울타리 FC 경기영상");
+  const base    = titleEl ? titleEl.value : (buildData[jid]?.title || "한울타리 FC 경기영상");
+  const title   = ytTitleFor(jid, base);
   try {
-    logLine(`YouTube 업로드 시작: ${allJobs.find(j=>j.id===jid)?.video_name||jid}`, "start");
+    logLine(`YouTube 업로드 시작: ${title}`, "start");
     await post(`/api/jobs/${jid}/upload-youtube`, {title});
     lastBuildHash = "";
   } catch(e) { logLine(`업로드 오류: ${e.message}`, "fail"); }
@@ -1146,13 +1305,32 @@ async function doUploadAll() {
     if (!buildData[i.dataset.bdTitle]) buildData[i.dataset.bdTitle] = {};
     buildData[i.dataset.bdTitle].title = i.value;
   });
+  persistBuildData();
   const titles = {};
-  done.forEach(j => { titles[j.id] = buildData[j.id]?.title || "한울타리 FC 경기영상"; });
+  done.forEach(j => {
+    const base = buildData[j.id]?.title || "한울타리 FC 경기영상";
+    titles[j.id] = ytTitleFor(j.id, base);
+  });
   try {
     const d = await post("/api/jobs/upload-all-youtube", {titles});
     logLine(`YouTube 전체 업로드 시작: ${d.n}개`, "done");
     lastBuildHash = "";
   } catch(e) { logLine(`업로드 오류: ${e.message}`, "fail"); }
+}
+
+// 생성 완료된 영상을 자동으로 YouTube 업로드 (옵션 켜진 경우)
+function checkAutoUpload() {
+  if (!autoUpload || !ytAuth) return;
+  for (const j of allJobs) {
+    if (j.status === "done" && j.output && !j.yt_status && !autoUploaded.has(j.id)) {
+      autoUploaded.add(j.id);
+      const base  = buildData[j.id]?.title || "한울타리 FC 경기영상";
+      const title = ytTitleFor(j.id, base);
+      logLine(`자동 업로드: ${title}`, "start");
+      post(`/api/jobs/${j.id}/upload-youtube`, {title})
+        .catch(e => logLine(`자동 업로드 실패: ${e.message}`, "fail"));
+    }
+  }
 }
 
 async function revokeYT() {
@@ -1202,7 +1380,7 @@ function updateBandPreview() {
 
   // 날짜별 그룹핑 미리보기
   const groups = {};
-  const today = new Date().toISOString().slice(0,10);
+  const today = localDateStr();
   uploaded.forEach(j => {
     const d = j.match_date || today;
     if (!groups[d]) groups[d] = [];

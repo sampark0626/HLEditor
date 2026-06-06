@@ -384,8 +384,15 @@ def api_jobs_build_all():
         and job["approved"] is not None
         and len(job["approved"]) > 0
     ]
+    # 저장은 됐지만 승인 구간이 0개인 잡 (하이라이트 없음 → 빌드 제외)
+    skipped = [
+        job["video_name"] for job in JOBS.values()
+        if job["status"] in ("ready", "done")
+        and job["approved"] is not None
+        and len(job["approved"]) == 0
+    ]
     if not to_build:
-        return jsonify({"error": "승인된 구간이 있는 잡이 없습니다."}), 400
+        return jsonify({"error": "승인된 구간이 있는 잡이 없습니다.", "skipped": skipped}), 400
 
     def _run():
         with _BUILD_LOCK:
@@ -422,7 +429,7 @@ def api_jobs_build_all():
                     log.exception("[%s] 빌드 실패", jid)
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"ok": True, "n": len(to_build)})
+    return jsonify({"ok": True, "n": len(to_build), "skipped": skipped})
 
 
 @app.route("/api/jobs/<jid>/output")
@@ -440,6 +447,29 @@ def api_job_delete(jid):
     if job and job.get("workdir") and os.path.exists(job["workdir"]):
         shutil.rmtree(job["workdir"], ignore_errors=True)
     log.info("잡 삭제: %s", jid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/jobs/<jid>/retry", methods=["POST"])
+def api_job_retry(jid):
+    """오류 상태인 잡을 같은 설정으로 다시 큐에 넣어 재처리."""
+    job = JOBS.get(jid)
+    if not job:
+        return jsonify({"error": "잡 없음"}), 404
+    if job["status"] != "error":
+        return jsonify({"error": "오류 상태인 잡만 재시도할 수 있습니다."}), 400
+    if job.get("workdir") and os.path.exists(job["workdir"]):
+        shutil.rmtree(job["workdir"], ignore_errors=True)
+    _upd(jid,
+         status="pending", error=None, candidates=[], vision_used=False,
+         usage=None, workdir=None, duration=None, approved=None,
+         output=None,
+         progress=dict(stage=None, done=0, total=0),
+         started_at=None, finished_at=None,
+         yt_status=None, yt_url=None, yt_error=None,
+         band_status=None, band_post_url=None, band_error=None)
+    JOB_QUEUE.put(jid)
+    log.info("[%s] 재시도 요청 — 큐에 재투입", jid)
     return jsonify({"ok": True})
 
 
@@ -509,9 +539,9 @@ def _upload_job_to_youtube(jid: str, title: str, privacy: str):
     _upd(jid, yt_status="uploading", yt_progress={"done": 0, "total": 0}, yt_error=None)
     log.info("[%s] YouTube 업로드 시작: %s", jid, title)
 
+    thumb_path = None
     try:
         # 썸네일 추출: 가장 신뢰도 높은 승인 후보
-        thumb_path = None
         approved = job.get("approved") or []
         cands     = job.get("candidates") or []
         if approved and cands and _HAS_YT:
