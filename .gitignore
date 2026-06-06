@@ -31,6 +31,11 @@ Thumbs.db
 *.log
 logs/
 
+# OAuth tokens (sensitive — never commit)
+youtube_token.json
+band_token.json
+client_secrets.json
+
 # Generated media / results
 highlights*.mp4
 test_clip.mp4

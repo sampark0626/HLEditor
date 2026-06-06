@@ -214,6 +214,45 @@ input[type=range] { flex:1; accent-color:var(--blue); }
 
 <!-- ══════════════ TAB: 영상 생성 ══════════════ -->
 <div class="pane" id="pane-build">
+
+  <!-- 인증 상태 바 -->
+  <div class="card" id="auth-card">
+    <div class="ct">외부 연동 인증 상태</div>
+    <div class="row" style="gap:20px; flex-wrap:wrap">
+      <!-- YouTube -->
+      <div style="display:flex;align-items:center;gap:8px;min-width:220px">
+        <span style="font-size:14px">▶</span>
+        <span style="font-size:13px;font-weight:600">YouTube</span>
+        <span id="yt-auth-badge" class="st {% if yt_auth %}st-done{% else %}st-error{% endif %}">
+          {% if yt_auth %}인증됨{% elif yt_has_secrets %}미인증{% else %}설정 필요{% endif %}
+        </span>
+        <span id="yt-channel-name" class="hint" style="font-size:11px"></span>
+        {% if yt_auth %}
+          <button class="ghost sm" onclick="revokeYT()">로그아웃</button>
+        {% elif yt_has_secrets %}
+          <a href="/auth/youtube"><button style="padding:4px 12px;font-size:12px">인증</button></a>
+        {% else %}
+          <span class="hint" style="font-size:11px">client_secrets.json 필요</span>
+        {% endif %}
+      </div>
+      <!-- BAND -->
+      <div style="display:flex;align-items:center;gap:8px;min-width:220px">
+        <span style="font-size:14px">📣</span>
+        <span style="font-size:13px;font-weight:600">BAND</span>
+        <span id="band-auth-badge" class="st {% if band_auth %}st-done{% else %}st-error{% endif %}">
+          {% if band_auth %}인증됨{% elif band_has_creds %}미인증{% else %}설정 필요{% endif %}
+        </span>
+        {% if band_auth %}
+          <button class="ghost sm" onclick="revokeBAND()">로그아웃</button>
+        {% elif band_has_creds %}
+          <a href="/auth/band"><button style="padding:4px 12px;font-size:12px">인증</button></a>
+        {% else %}
+          <span class="hint" style="font-size:11px">BAND_CLIENT_ID/SECRET 필요</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="ct">생성 설정</div>
     <div class="row" style="gap:16px; flex-wrap:wrap">
@@ -225,6 +264,8 @@ input[type=range] { flex:1; accent-color:var(--blue); }
         </select>
       </label>
       <button id="btn-build-all" onclick="doBuildAll()">선택된 영상 일괄 생성</button>
+      <button id="btn-upload-all" class="ghost" onclick="doUploadAll()"
+        title="완료된 모든 영상을 YouTube에 업로드">▶ YouTube 전체 업로드</button>
     </div>
     <div class="hint" style="margin-top:5px">
       리뷰 탭에서 저장된 항목만 생성됩니다. 영상별 제목·파일명은 아래에서 수정하세요.
@@ -232,6 +273,22 @@ input[type=range] { flex:1; accent-color:var(--blue); }
   </div>
   <div id="build-list">
     <div class="hint" style="padding:24px 0;text-align:center">승인된 영상이 없습니다.</div>
+  </div>
+
+  <!-- BAND 게시 섹션 -->
+  <div class="card" id="band-post-card" style="display:none">
+    <div class="ct">BAND 게시 <span class="hint" style="text-transform:none;font-weight:400">(YouTube 업로드 완료된 영상만 · 같은 날짜끼리 한 게시글)</span></div>
+    <div class="row" style="gap:12px; flex-wrap:wrap; margin-bottom:8px">
+      <label class="hint" style="white-space:nowrap;margin:0">밴드 선택
+        <select id="band-sel" style="margin-left:6px;min-width:160px">
+          <option value="">-- 선택 --</option>
+        </select>
+      </label>
+      <button onclick="doPostBand()">📣 BAND에 게시</button>
+      <button class="ghost sm" onclick="loadBands()">↺ 밴드 목록 새로고침</button>
+    </div>
+    <div id="band-post-preview" class="hint" style="font-size:11px;white-space:pre-wrap;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:8px;max-height:120px;overflow-y:auto"></div>
+    <div id="band-post-result" style="margin-top:8px"></div>
   </div>
 </div>
 
@@ -241,6 +298,8 @@ input[type=range] { flex:1; accent-color:var(--blue); }
 const CONF_AUTO  = {{ conf_auto }};
 const CONF_MAYBE = {{ conf_maybe }};
 const SENSITIVITIES = {{ sensitivities | tojson }};
+const YT_AUTH    = {{ 'true' if yt_auth else 'false' }};
+const BAND_AUTH  = {{ 'true' if band_auth else 'false' }};
 
 // ─── 전역 상태 ──────────────────────────────────────────
 let allJobs    = [];
@@ -264,6 +323,12 @@ let wasProcessing  = false;
 let lastQueueHash  = "";
 let lastReviewHash = "";
 let lastBuildHash  = "";
+
+// YouTube / BAND 상태
+let ytAuth   = YT_AUTH;
+let bandAuth = BAND_AUTH;
+let bandList = [];   // [{band_key, name, member_count}]
+let bandListLoaded = false;
 
 // ─── 알림 ───────────────────────────────────────────────
 (function initNotif() {
@@ -863,7 +928,8 @@ async function bulkSaveAndBuild() {
 // ─── 생성 탭 렌더 ───────────────────────────────────────
 function renderBuild() {
   const jobs = allJobs.filter(j => j.n_approved !== null && j.n_approved > 0);
-  const h = JSON.stringify(jobs.map(j => [j.id, j.status, j.n_approved, j.output, j.progress]));
+  const h = JSON.stringify(jobs.map(j =>
+    [j.id, j.status, j.n_approved, j.output, j.progress, j.yt_status, j.yt_url, j.band_status]));
   if (h === lastBuildHash) return;
   lastBuildHash = h;
 
@@ -880,6 +946,9 @@ function renderBuild() {
   const el = document.getElementById("build-list");
   if (!jobs.length) {
     el.innerHTML = '<div class="hint" style="padding:24px 0;text-align:center">리뷰 탭에서 구간을 선택하고 저장하면 여기 나타납니다.</div>';
+    // BAND 섹션 숨기기
+    const bc = document.getElementById("band-post-card");
+    if (bc) bc.style.display = "none";
     return;
   }
 
@@ -892,6 +961,7 @@ function renderBuild() {
       buildData[j.id].output = "highlights_" + j.video_name.replace(/\.[^.]+$/, "") + ".mp4";
 
     const prog = j.progress || {};
+    // 영상 생성 상태
     let stHtml = stBadge(j.status);
     if (j.status === "done" && j.output) {
       stHtml = `<span class="st st-done">완료</span>
@@ -901,15 +971,51 @@ function renderBuild() {
       stHtml += `<div class="bar" style="margin-top:4px;width:120px"><i style="width:${pct}%"></i></div>
         <span class="hint">${prog.done}/${prog.total} (${pct}%)</span>`;
     }
+
+    // YouTube 상태 셀
+    let ytHtml = '<span class="hint" style="color:var(--rej)">-</span>';
+    if (j.status === "done" && j.output) {
+      if (!j.yt_status) {
+        ytHtml = ytAuth
+          ? `<button class="ghost sm" onclick="doUploadOne('${j.id}')">업로드</button>`
+          : `<span class="hint">미인증</span>`;
+      } else if (j.yt_status === "uploading") {
+        const yp = j.yt_progress || {};
+        const pct = yp.total > 0 ? Math.round(yp.done / yp.total * 100) : 0;
+        ytHtml = `<span class="spin"></span><span class="hint">${pct}%</span>`;
+      } else if (j.yt_status === "done" && j.yt_url) {
+        ytHtml = `<a href="${esc(j.yt_url)}" target="_blank"
+          style="color:var(--accent);font-size:12px;word-break:break-all">${esc(j.yt_url)}</a>`;
+      } else if (j.yt_status === "error") {
+        ytHtml = `<span style="color:var(--red);font-size:11px" title="${esc(j.yt_error||'')}">오류 ⚠</span>
+          <button class="ghost sm" onclick="doUploadOne('${j.id}')">재시도</button>`;
+      }
+    }
+
+    // BAND 상태 셀
+    let bandHtml = '<span class="hint" style="color:var(--rej)">-</span>';
+    if (j.yt_status === "done" && j.yt_url) {
+      if (!j.band_status) {
+        bandHtml = `<span class="hint" style="font-size:11px">BAND 게시 대기</span>`;
+      } else if (j.band_status === "done" && j.band_post_url) {
+        bandHtml = `<a href="${esc(j.band_post_url)}" target="_blank"
+          style="color:var(--purple);font-size:12px">게시됨 ↗</a>`;
+      } else if (j.band_status === "error") {
+        bandHtml = `<span style="color:var(--red);font-size:11px" title="${esc(j.band_error||'')}">오류 ⚠</span>`;
+      }
+    }
+
     rows += `<tr>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;padding-right:10px"
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;padding-right:8px"
           title="${esc(j.video_name)}">${esc(j.video_name)}</td>
       <td style="font-weight:700;color:var(--accent);text-align:center">${j.n_approved}</td>
       <td><input type="text" data-bd-title="${j.id}" value="${esc(buildData[j.id].title)}"
-          style="min-width:unset;width:170px;font-size:12px;padding:5px 7px"></td>
+          style="min-width:unset;width:150px;font-size:12px;padding:5px 7px"></td>
       <td><input type="text" data-bd-out="${j.id}" value="${esc(buildData[j.id].output)}"
-          style="min-width:unset;width:200px;font-size:12px;padding:5px 7px"></td>
+          style="min-width:unset;width:180px;font-size:12px;padding:5px 7px"></td>
       <td style="white-space:nowrap">${stHtml}</td>
+      <td style="min-width:120px">${ytHtml}</td>
+      <td style="min-width:90px">${bandHtml}</td>
     </tr>`;
   }
 
@@ -917,11 +1023,15 @@ function renderBuild() {
     <div style="overflow-x:auto">
     <table>
       <thead><tr>
-        <th>영상</th><th style="text-align:center">선택<br>구간</th>
-        <th>제목(우상단 워터마크)</th><th>출력 파일명</th><th>상태</th>
+        <th>영상</th><th style="text-align:center">구간</th>
+        <th>제목(워터마크)</th><th>출력 파일명</th><th>생성</th>
+        <th>YouTube</th><th>BAND</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div></div>`;
+
+  // BAND 게시 카드 — YouTube 완료 영상이 있을 때 표시
+  updateBandCard();
 }
 
 async function doBuildAll() {
@@ -1011,6 +1121,144 @@ function logLine(msg, kind="") {
   p.appendChild(d);
   p.scrollTop = p.scrollHeight;
 }
+
+// ─── YouTube 함수 ────────────────────────────────────────
+async function doUploadOne(jid) {
+  if (!ytAuth) { alert("YouTube 인증이 필요합니다. 인증 버튼을 클릭하세요."); return; }
+  // 현재 입력된 제목 수집
+  const titleEl = document.querySelector(`[data-bd-title="${jid}"]`);
+  const title   = titleEl ? titleEl.value : (buildData[jid]?.title || "한울타리 FC 경기영상");
+  try {
+    logLine(`YouTube 업로드 시작: ${allJobs.find(j=>j.id===jid)?.video_name||jid}`, "start");
+    await post(`/api/jobs/${jid}/upload-youtube`, {title});
+    lastBuildHash = "";
+  } catch(e) { logLine(`업로드 오류: ${e.message}`, "fail"); }
+}
+
+async function doUploadAll() {
+  if (!ytAuth) { alert("YouTube 인증이 필요합니다."); return; }
+  const done = allJobs.filter(j => j.status === "done" && j.output &&
+    j.yt_status !== "uploading" && j.yt_status !== "done");
+  if (!done.length) { logLine("업로드할 완료 영상 없음", "fail"); return; }
+  if (!confirm(`완료된 ${done.length}개 영상을 YouTube에 업로드합니다.`)) return;
+  // 제목 수집
+  document.querySelectorAll("[data-bd-title]").forEach(i => {
+    if (!buildData[i.dataset.bdTitle]) buildData[i.dataset.bdTitle] = {};
+    buildData[i.dataset.bdTitle].title = i.value;
+  });
+  const titles = {};
+  done.forEach(j => { titles[j.id] = buildData[j.id]?.title || "한울타리 FC 경기영상"; });
+  try {
+    const d = await post("/api/jobs/upload-all-youtube", {titles});
+    logLine(`YouTube 전체 업로드 시작: ${d.n}개`, "done");
+    lastBuildHash = "";
+  } catch(e) { logLine(`업로드 오류: ${e.message}`, "fail"); }
+}
+
+async function revokeYT() {
+  if (!confirm("YouTube 인증을 해제합니다.")) return;
+  await post("/auth/youtube/revoke", {});
+  ytAuth = false;
+  document.getElementById("yt-auth-badge").textContent = "미인증";
+  document.getElementById("yt-auth-badge").className = "st st-error";
+  lastBuildHash = "";
+  logLine("YouTube 로그아웃", "done");
+}
+
+// ─── BAND 함수 ───────────────────────────────────────────
+async function loadBands() {
+  try {
+    const d = await (await fetch("/api/auth/band/status")).json();
+    bandAuth = d.ok;
+    bandList = d.bands || [];
+    bandListLoaded = true;
+    const sel = document.getElementById("band-sel");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">-- 선택 --</option>';
+    bandList.forEach(b => {
+      sel.innerHTML += `<option value="${esc(b.band_key)}">${esc(b.name)} (${b.member_count}명)</option>`;
+    });
+    // .env의 기본 밴드 자동 선택은 서버에서 처리
+  } catch(e) {}
+}
+
+function updateBandCard() {
+  const hasUploaded = allJobs.some(j => j.yt_status === "done" && j.yt_url);
+  const bc = document.getElementById("band-post-card");
+  if (!bc) return;
+  bc.style.display = bandAuth && hasUploaded ? "block" : "none";
+
+  if (!bandAuth || !hasUploaded) return;
+  if (!bandListLoaded) loadBands();
+  updateBandPreview();
+}
+
+function updateBandPreview() {
+  const prev = document.getElementById("band-post-preview");
+  if (!prev) return;
+  const uploaded = allJobs.filter(j => j.yt_status === "done" && j.yt_url
+    && j.band_status !== "done");
+  if (!uploaded.length) { prev.textContent = "게시할 새 링크 없음"; return; }
+
+  // 날짜별 그룹핑 미리보기
+  const groups = {};
+  const today = new Date().toISOString().slice(0,10);
+  uploaded.forEach(j => {
+    const d = j.match_date || today;
+    if (!groups[d]) groups[d] = [];
+    groups[d].push([j.video_name.replace(/\.[^.]+$/,""), j.yt_url]);
+  });
+  let text = "";
+  for (const [d, pairs] of Object.entries(groups)) {
+    const dt = new Date(d + "T00:00:00");
+    const ds = `${dt.getFullYear()}년 ${dt.getMonth()+1}월 ${dt.getDate()}일`;
+    text += `⚽ ${ds} 경기 하이라이트 영상입니다.\n\n`;
+    pairs.forEach(([n, u]) => { text += `📹 ${n}\n${u}\n\n`; });
+    text += "HLEditor 자동 생성\n\n---\n";
+  }
+  prev.textContent = text.trim();
+}
+
+async function doPostBand() {
+  if (!bandAuth) { alert("BAND 인증이 필요합니다."); return; }
+  const sel = document.getElementById("band-sel");
+  const band_key = sel ? sel.value : "";
+  if (!band_key) { alert("밴드를 선택하세요."); return; }
+
+  const resultEl = document.getElementById("band-post-result");
+  if (resultEl) resultEl.innerHTML = '<span class="spin"></span><span class="hint">게시 중…</span>';
+  try {
+    const d = await post("/api/jobs/post-band", {band_key});
+    const n = (d.posted||[]).reduce((s,p) => s + p.n, 0);
+    logLine(`BAND 게시 완료: ${n}개 영상 링크`, "done");
+    if (resultEl) resultEl.innerHTML =
+      (d.posted||[]).map(p =>
+        `<span style="color:var(--accent);font-size:12px">✓ ${p.date} ${p.n}개 게시됨</span>`+
+        (p.url ? ` <a href="${esc(p.url)}" target="_blank" style="color:var(--blue);font-size:11px">↗</a>` : "")
+      ).join("<br>");
+    (d.errors||[]).forEach(e => logLine(`BAND 오류 ${e.date}: ${e.error}`, "fail"));
+    lastBuildHash = "";
+    sendNotif("📣 BAND 게시 완료", `${n}개 영상 링크가 BAND에 게시되었습니다.`);
+  } catch(e) {
+    if (resultEl) resultEl.innerHTML = `<span style="color:var(--red);font-size:12px">오류: ${esc(e.message)}</span>`;
+    logLine("BAND 게시 실패: " + e.message, "fail");
+  }
+}
+
+async function revokeBAND() {
+  if (!confirm("BAND 인증을 해제합니다.")) return;
+  await post("/auth/band/revoke", {});
+  bandAuth = false;
+  const bc = document.getElementById("band-post-card");
+  if (bc) bc.style.display = "none";
+  document.getElementById("band-auth-badge").textContent = "미인증";
+  document.getElementById("band-auth-badge").className = "st st-error";
+  logLine("BAND 로그아웃", "done");
+}
+
+// 생성 탭 활성화 시 BAND 카드 갱신
+const _origGo = go;
+// go() 이미 정의됨 — renderBuild 호출 시 updateBandCard 포함
 </script>
 </body>
 </html>

@@ -12,12 +12,26 @@ import time
 import traceback
 import uuid
 import webbrowser
+from datetime import date
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, redirect, render_template, request, send_file
 import logging
 
 import soccer_highlights as sh
+
+# YouTube / BAND 모듈 (선택적 — 패키지 미설치 시 기능 비활성화)
+try:
+    import youtube_uploader as yt_up
+    _HAS_YT = True
+except Exception:
+    _HAS_YT = False
+
+try:
+    import band_poster as bp
+    _HAS_BAND = True
+except Exception:
+    _HAS_BAND = False
 
 app = Flask(__name__)
 
@@ -57,6 +71,16 @@ def _new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS):
         progress=dict(stage=None, done=0, total=0),
         started_at=None,   # monotonic timestamp — 처리 시작
         finished_at=None,  # monotonic timestamp — ready 도달
+        # YouTube 업로드 상태
+        yt_status=None,    # None | "uploading" | "done" | "error"
+        yt_url=None,       # https://youtu.be/<id>
+        yt_error=None,
+        yt_progress=dict(done=0, total=0),
+        # BAND 게시 상태
+        band_status=None,  # None | "posting" | "done" | "error"
+        band_post_url=None,
+        band_error=None,
+        match_date=date.today().isoformat(),  # BAND 날짜별 그룹핑용
     )
     with _JLOCK:
         JOBS[jid] = job
@@ -187,6 +211,14 @@ def _job_summary(job):
         output=job["output"],
         vision_used=vu,
         elapsed_sec=elapsed,
+        yt_status=job.get("yt_status"),
+        yt_url=job.get("yt_url"),
+        yt_error=job.get("yt_error"),
+        yt_progress=job.get("yt_progress", {"done": 0, "total": 0}),
+        band_status=job.get("band_status"),
+        band_post_url=job.get("band_post_url"),
+        band_error=job.get("band_error"),
+        match_date=job.get("match_date"),
     )
 
 
@@ -210,13 +242,21 @@ def _serialize_cands(cands, conf_auto, vision_used):
 # ─── 라우트 ───────────────────────────────────────────────
 @app.route("/")
 def index():
+    yt_auth = _HAS_YT and yt_up.is_authenticated()
+    yt_has_secrets = _HAS_YT and yt_up.has_client_secrets()
+    band_auth = _HAS_BAND and bp.is_authenticated()
+    band_has_creds = _HAS_BAND and bp.has_credentials()
     return render_template("index.html",
                            conf_auto=sh.CONF_AUTO,
                            conf_maybe=sh.CONF_MAYBE,
                            workers=sh.VISION_WORKERS,
                            has_key=bool(load_api_key()),
                            sensitivities=sh.SENSITIVITY_PRESETS,
-                           qualities=sh.QUALITY_PRESETS)
+                           qualities=sh.QUALITY_PRESETS,
+                           yt_auth=yt_auth,
+                           yt_has_secrets=yt_has_secrets,
+                           band_auth=band_auth,
+                           band_has_creds=band_has_creds)
 
 
 @app.route("/api/browse", methods=["POST"])
@@ -401,6 +441,301 @@ def api_job_delete(jid):
         shutil.rmtree(job["workdir"], ignore_errors=True)
     log.info("잡 삭제: %s", jid)
     return jsonify({"ok": True})
+
+
+# ─── YouTube OAuth ────────────────────────────────────────
+def _yt_redirect_uri():
+    return "http://localhost:5000/auth/youtube/callback"
+
+
+@app.route("/auth/youtube")
+def auth_youtube():
+    if not _HAS_YT:
+        return "google-auth-oauthlib 패키지 없음. pip install google-auth-oauthlib", 500
+    try:
+        url = yt_up.get_auth_url(_yt_redirect_uri())
+        return redirect(url)
+    except FileNotFoundError as e:
+        return str(e), 400
+
+
+@app.route("/auth/youtube/callback")
+def auth_youtube_callback():
+    code = request.args.get("code", "")
+    if not code:
+        return "인증 코드 없음", 400
+    try:
+        yt_up.exchange_code(code, _yt_redirect_uri())
+        log.info("YouTube 인증 완료")
+        return redirect("/?yt=ok")
+    except Exception as e:
+        log.exception("YouTube 인증 실패")
+        return f"YouTube 인증 실패: {e}", 500
+
+
+@app.route("/api/auth/youtube/status")
+def api_yt_status():
+    if not _HAS_YT:
+        return jsonify({"ok": False, "reason": "패키지 없음"})
+    authenticated = yt_up.is_authenticated()
+    channel = yt_up.get_channel_info() if authenticated else None
+    return jsonify({
+        "ok": authenticated,
+        "has_secrets": yt_up.has_client_secrets(),
+        "channel": channel,
+    })
+
+
+@app.route("/auth/youtube/revoke", methods=["POST"])
+def auth_youtube_revoke():
+    if _HAS_YT:
+        yt_up.revoke()
+    return jsonify({"ok": True})
+
+
+# ─── YouTube 업로드 ───────────────────────────────────────
+def _upload_job_to_youtube(jid: str, title: str, privacy: str):
+    """배경 스레드: 하이라이트 영상 → YouTube 업로드."""
+    import tempfile as _tmp
+
+    job = JOBS.get(jid)
+    if not job:
+        return
+    output = job.get("output")
+    if not output or not os.path.exists(output):
+        _upd(jid, yt_status="error", yt_error="출력 파일 없음")
+        return
+
+    _upd(jid, yt_status="uploading", yt_progress={"done": 0, "total": 0}, yt_error=None)
+    log.info("[%s] YouTube 업로드 시작: %s", jid, title)
+
+    try:
+        # 썸네일 추출: 가장 신뢰도 높은 승인 후보
+        thumb_path = None
+        approved = job.get("approved") or []
+        cands     = job.get("candidates") or []
+        if approved and cands and _HAS_YT:
+            best = max(
+                (cands[i] for i in approved if i < len(cands)),
+                key=lambda c: float(c.get("confidence") or 0),
+                default=None,
+            )
+            if best:
+                tf = _tmp.NamedTemporaryFile(suffix=".jpg", delete=False)
+                tf.close()
+                peak = float(best.get("peak", 0))
+                if yt_up.extract_thumbnail(job["video"], peak, tf.name):
+                    thumb_path = tf.name
+                else:
+                    try: os.unlink(tf.name)
+                    except Exception: pass
+
+        # 설명 생성
+        desc = yt_up.generate_description(cands, approved, job["video_name"])
+
+        def _on_prog(done, total):
+            _upd(jid, yt_progress={"done": done, "total": total})
+
+        yt_url = yt_up.upload_video(
+            output, title, desc,
+            thumbnail_path=thumb_path,
+            privacy=privacy,
+            on_progress=_on_prog,
+        )
+        _upd(jid, yt_status="done", yt_url=yt_url, yt_progress={"done": 1, "total": 1})
+        log.info("[%s] YouTube 업로드 완료: %s", jid, yt_url)
+    except Exception as e:
+        msg = str(e)[:300]
+        _upd(jid, yt_status="error", yt_error=msg)
+        log.exception("[%s] YouTube 업로드 실패", jid)
+    finally:
+        if thumb_path and os.path.exists(thumb_path):
+            try: os.unlink(thumb_path)
+            except Exception: pass
+
+
+@app.route("/api/jobs/<jid>/upload-youtube", methods=["POST"])
+def api_upload_youtube(jid):
+    if not _HAS_YT:
+        return jsonify({"error": "google-auth-oauthlib 패키지 없음"}), 500
+    if not yt_up.is_authenticated():
+        return jsonify({"error": "YouTube 인증 필요. /auth/youtube 로 인증하세요."}), 401
+    job = JOBS.get(jid)
+    if not job:
+        return jsonify({"error": "잡 없음"}), 404
+    if job.get("status") != "done" or not job.get("output"):
+        return jsonify({"error": "영상이 아직 생성되지 않았습니다."}), 400
+    if job.get("yt_status") == "uploading":
+        return jsonify({"error": "업로드 중입니다."}), 409
+
+    body    = request.json or {}
+    title   = body.get("title", "한울타리 FC 경기영상").strip() or "한울타리 FC 경기영상"
+    privacy = _get_yt_privacy()
+
+    threading.Thread(
+        target=_upload_job_to_youtube,
+        args=(jid, title, privacy),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/jobs/upload-all-youtube", methods=["POST"])
+def api_upload_all_youtube():
+    if not _HAS_YT:
+        return jsonify({"error": "google-auth-oauthlib 패키지 없음"}), 500
+    if not yt_up.is_authenticated():
+        return jsonify({"error": "YouTube 인증 필요"}), 401
+
+    body    = request.json or {}
+    titles  = body.get("titles", {})
+    privacy = _get_yt_privacy()
+
+    to_upload = [
+        j for j in JOBS.values()
+        if j.get("status") == "done"
+        and j.get("output")
+        and j.get("yt_status") not in ("uploading", "done")
+    ]
+    if not to_upload:
+        return jsonify({"error": "업로드할 영상이 없습니다."}), 400
+
+    for job in to_upload:
+        jid   = job["id"]
+        title = titles.get(jid, "한울타리 FC 경기영상").strip() or "한울타리 FC 경기영상"
+        threading.Thread(
+            target=_upload_job_to_youtube,
+            args=(jid, title, privacy),
+            daemon=True,
+        ).start()
+
+    return jsonify({"ok": True, "n": len(to_upload)})
+
+
+def _get_yt_privacy() -> str:
+    """YOUTUBE_PRIVACY .env 값 (기본: public)."""
+    env = {}
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return os.environ.get("YOUTUBE_PRIVACY") or env.get("YOUTUBE_PRIVACY", "public")
+
+
+# ─── BAND OAuth ───────────────────────────────────────────
+def _band_redirect_uri():
+    return "http://localhost:5000/auth/band/callback"
+
+
+@app.route("/auth/band")
+def auth_band():
+    if not _HAS_BAND:
+        return "requests 패키지 없음. pip install requests", 500
+    try:
+        url = bp.get_auth_url(_band_redirect_uri())
+        return redirect(url)
+    except ValueError as e:
+        return str(e), 400
+
+
+@app.route("/auth/band/callback")
+def auth_band_callback():
+    code = request.args.get("code", "")
+    if not code:
+        return "인증 코드 없음", 400
+    try:
+        bp.exchange_code(code, _band_redirect_uri())
+        log.info("BAND 인증 완료")
+        return redirect("/?band=ok")
+    except Exception as e:
+        log.exception("BAND 인증 실패")
+        return f"BAND 인증 실패: {e}", 500
+
+
+@app.route("/api/auth/band/status")
+def api_band_status():
+    if not _HAS_BAND:
+        return jsonify({"ok": False, "reason": "패키지 없음"})
+    authenticated = bp.is_authenticated()
+    bands = []
+    if authenticated:
+        try:
+            bands = bp.get_bands()
+        except Exception:
+            pass
+    return jsonify({
+        "ok": authenticated,
+        "has_creds": bp.has_credentials(),
+        "bands": bands,
+    })
+
+
+@app.route("/auth/band/revoke", methods=["POST"])
+def auth_band_revoke():
+    if _HAS_BAND:
+        bp.revoke()
+    return jsonify({"ok": True})
+
+
+# ─── BAND 게시 ────────────────────────────────────────────
+@app.route("/api/jobs/post-band", methods=["POST"])
+def api_post_band():
+    if not _HAS_BAND:
+        return jsonify({"error": "requests 패키지 없음"}), 500
+    if not bp.is_authenticated():
+        return jsonify({"error": "BAND 인증 필요. /auth/band 로 인증하세요."}), 401
+
+    body     = request.json or {}
+    band_key = body.get("band_key", "").strip()
+    if not band_key:
+        # .env의 BAND_TARGET_KEY 사용
+        env_path = Path(__file__).parent / ".env"
+        for line in (env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []):
+            line = line.strip()
+            if line.startswith("BAND_TARGET_KEY=") and not line.startswith("#"):
+                band_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    if not band_key:
+        return jsonify({"error": "밴드를 선택하거나 BAND_TARGET_KEY를 .env에 설정하세요."}), 400
+
+    # 업로드 완료된 잡들을 날짜별 그룹핑
+    uploaded = [
+        {
+            "id":         j["id"],
+            "video_name": j["video_name"],
+            "yt_url":     j.get("yt_url", ""),
+            "match_date": j.get("match_date", date.today().isoformat()),
+        }
+        for j in JOBS.values()
+        if j.get("yt_url") and j.get("yt_status") == "done"
+        and j.get("band_status") not in ("posting", "done")
+    ]
+    if not uploaded:
+        return jsonify({"error": "BAND에 게시할 YouTube 링크가 없습니다."}), 400
+
+    groups = bp.group_by_date(uploaded)
+
+    results = []
+    errors  = []
+    for match_date, video_links in groups.items():
+        content = bp.format_post_content(video_links, match_date=match_date)
+        try:
+            post_url = bp.write_post(band_key, content)
+            # 해당 잡들 상태 업데이트
+            for vname, vurl in video_links:
+                for j in JOBS.values():
+                    if j.get("yt_url") == vurl:
+                        _upd(j["id"], band_status="done", band_post_url=post_url)
+            results.append({"date": match_date, "n": len(video_links), "url": post_url})
+            log.info("BAND 게시 완료: %s, %d개 영상", match_date, len(video_links))
+        except Exception as e:
+            errors.append({"date": match_date, "error": str(e)[:200]})
+            log.exception("BAND 게시 실패: %s", match_date)
+
+    return jsonify({"posted": results, "errors": errors})
 
 
 if __name__ == "__main__":
