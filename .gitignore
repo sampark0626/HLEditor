@@ -35,6 +35,7 @@ logs/
 youtube_token.json
 band_token.json
 client_secrets.json
+client_secret.json
 
 # Generated media / results
 highlights*.mp4

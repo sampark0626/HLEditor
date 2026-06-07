@@ -96,6 +96,10 @@ def _get_credentials():
     return creds
 
 
+# PKCE: state → flow 보존 (get_auth_url ~ exchange_code 사이에 flow 유지)
+_PENDING_FLOWS: dict = {}
+
+
 # ─── 공개 API ─────────────────────────────────────────────────────────────────
 def has_client_secrets() -> bool:
     """client_secrets.json 파일이 있는지 확인."""
@@ -105,13 +109,16 @@ def has_client_secrets() -> bool:
 def get_auth_url(redirect_uri: str) -> str:
     """OAuth 인증 URL 반환 (브라우저에서 열어 인증)."""
     flow = _get_flow(redirect_uri)
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    auth_url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    # PKCE code_verifier가 flow 안에 있으므로 state 키로 보존
+    _PENDING_FLOWS[state] = flow
     return auth_url
 
 
-def exchange_code(code: str, redirect_uri: str) -> None:
+def exchange_code(code: str, redirect_uri: str, state: str = "") -> None:
     """인증 코드 → 토큰 교환 후 youtube_token.json 저장."""
-    flow = _get_flow(redirect_uri)
+    # 같은 flow 객체를 재사용해야 PKCE code_verifier가 유효함
+    flow = _PENDING_FLOWS.pop(state, None) or _get_flow(redirect_uri)
     flow.fetch_token(code=code)
     _save_token(flow.credentials)
 

@@ -603,9 +603,10 @@ function renderQueue() {
     let timeHtml = "";
     if (elapsed.length > 0) {
       const avg = elapsed.reduce((a, b) => a + b, 0) / elapsed.length;
-      const remaining = pending * avg;
+      // pending(미시작) + proc(처리중) 모두 잔여로 계산
+      const remaining = (pending + proc) * avg;
       timeHtml = `<span class="qs-time">· 영상당 평균 ${fmtSec(avg)} · 예상 잔여 ~${fmtSec(remaining)}</span>`;
-    } else if (pending > 0) {
+    } else if (pending + proc > 0) {
       timeHtml = `<span class="qs-time">· 영상당 약 5분 예상</span>`;
     }
     sumEl.innerHTML =

@@ -491,11 +491,12 @@ def auth_youtube():
 
 @app.route("/auth/youtube/callback")
 def auth_youtube_callback():
-    code = request.args.get("code", "")
+    code  = request.args.get("code", "")
+    state = request.args.get("state", "")
     if not code:
         return "인증 코드 없음", 400
     try:
-        yt_up.exchange_code(code, _yt_redirect_uri())
+        yt_up.exchange_code(code, _yt_redirect_uri(), state=state)
         log.info("YouTube 인증 완료")
         return redirect("/?yt=ok")
     except Exception as e:
