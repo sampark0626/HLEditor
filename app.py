@@ -116,6 +116,36 @@ def load_api_key():
     return None
 
 
+# ─── 오류 메시지 정리 ────────────────────────────────────
+def _friendly_error(exc: Exception) -> str:
+    """예외를 사람이 읽기 쉬운 한 줄 메시지로 변환."""
+    msg = str(exc)
+    etype = type(exc).__name__
+
+    # ffmpeg / ffprobe 없음
+    if isinstance(exc, FileNotFoundError):
+        if "ffmpeg" in msg.lower() or "ffprobe" in msg.lower() or "WinError 2" in msg:
+            return (
+                "ffmpeg를 찾을 수 없습니다. "
+                "설치 후 앱을 재시작하세요.\n"
+                "  winget install Gyan.FFmpeg  (관리자 PowerShell)\n"
+                "또는 https://ffmpeg.org/download.html 에서 수동 설치"
+            )
+        return f"파일을 찾을 수 없습니다: {msg}"
+
+    # ffmpeg 실행 오류
+    if isinstance(exc, RuntimeError) and "command failed" in msg:
+        return f"ffmpeg 실행 오류: {msg}"
+
+    # 영상 파일 없음·접근 불가
+    if isinstance(exc, (FileNotFoundError, PermissionError, OSError)):
+        return f"[{etype}] {msg}"
+
+    # 그 외: 마지막 줄만 표시 (트레이스백 제외)
+    last_line = msg.strip().splitlines()[-1] if msg.strip() else repr(exc)
+    return f"[{etype}] {last_line}"
+
+
 # ─── 백그라운드 워커 (순차) ───────────────────────────────
 def _worker():
     while True:
@@ -124,8 +154,8 @@ def _worker():
             break
         try:
             _process(jid)
-        except Exception:
-            _upd(jid, status="error", error=traceback.format_exc()[-400:])
+        except Exception as exc:
+            _upd(jid, status="error", error=_friendly_error(exc))
             log.exception("[%s] 처리 실패", jid)
         finally:
             JOB_QUEUE.task_done()
@@ -240,6 +270,17 @@ def _serialize_cands(cands, conf_auto, vision_used):
 
 
 # ─── 라우트 ───────────────────────────────────────────────
+def _ffmpeg_ok() -> bool:
+    """ffmpeg + ffprobe 가 PATH에 있는지 확인 (캐시 없이 매번 체크)."""
+    import subprocess as _sp
+    for tool in ("ffmpeg", "ffprobe"):
+        try:
+            _sp.run([tool, "-version"], capture_output=True, check=False)
+        except FileNotFoundError:
+            return False
+    return True
+
+
 @app.route("/")
 def index():
     yt_auth = _HAS_YT and yt_up.is_authenticated()
@@ -251,6 +292,7 @@ def index():
                            conf_maybe=sh.CONF_MAYBE,
                            workers=sh.VISION_WORKERS,
                            has_key=bool(load_api_key()),
+                           ffmpeg_ok=_ffmpeg_ok(),
                            sensitivities=sh.SENSITIVITY_PRESETS,
                            qualities=sh.QUALITY_PRESETS,
                            yt_auth=yt_auth,
@@ -769,7 +811,30 @@ def api_post_band():
     return jsonify({"posted": results, "errors": errors})
 
 
+def _check_ffmpeg():
+    """ffmpeg/ffprobe 설치 여부를 확인하고 없으면 경고."""
+    import subprocess as _sp
+    missing = []
+    for tool in ("ffmpeg", "ffprobe"):
+        try:
+            _sp.run([tool, "-version"], capture_output=True, check=False)
+        except FileNotFoundError:
+            missing.append(tool)
+    if missing:
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"  [경고] {', '.join(missing)} 를 찾을 수 없습니다!")
+        print(f"  영상 처리를 하려면 ffmpeg 설치가 필요합니다.")
+        print(f"")
+        print(f"  Windows 설치 방법 (관리자 PowerShell):")
+        print(f"    winget install Gyan.FFmpeg")
+        print(f"  또는: https://ffmpeg.org/download.html")
+        print(f"{sep}\n")
+    return len(missing) == 0
+
+
 if __name__ == "__main__":
+    _check_ffmpeg()
     worker_t = threading.Thread(target=_worker, daemon=True, name="hl-worker")
     worker_t.start()
     url = "http://127.0.0.1:5000"

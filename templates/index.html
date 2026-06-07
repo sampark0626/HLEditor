@@ -125,6 +125,20 @@ input[type=range] { flex:1; accent-color:var(--blue); }
 <!-- ══════════════ TAB: 큐 관리 ══════════════ -->
 <div class="pane on" id="pane-queue">
 
+  <!-- ffmpeg 없을 때 경고 배너 -->
+  {% if not ffmpeg_ok %}
+  <div style="background:#3a1010;border:1px solid var(--red);border-radius:8px;padding:12px 16px;margin-bottom:14px;font-size:13px">
+    <b style="color:var(--red)">ffmpeg가 설치되어 있지 않습니다.</b>
+    영상 처리를 시작하기 전에 먼저 설치하세요.<br>
+    <code style="background:#0d1117;padding:2px 8px;border-radius:4px;font-size:12px;margin-top:6px;display:inline-block">
+      winget install Gyan.FFmpeg
+    </code>
+    <span class="hint" style="font-size:11px;margin-left:8px">
+      (관리자 PowerShell에서 실행 후 앱 재시작)
+    </span>
+  </div>
+  {% endif %}
+
   <!-- 알림 권한 바 -->
   <div id="notif-bar" style="display:none">
     <span>처리 완료 알림을 받으시겠습니까?</span>
@@ -657,7 +671,7 @@ function renderQueue() {
     if (noHighlight)
       meta.push(`<span style="color:var(--warn)">⚠ 하이라이트 없음 — 임계 낮춰 재검토</span>`);
     const err = j.error
-      ? `<div class="hint fail" style="margin-top:3px">오류: ${esc(j.error.substring(0,120))}</div>` : "";
+      ? `<div class="hint fail" style="margin-top:3px;white-space:pre-wrap;word-break:break-word">오류: ${esc(j.error)}</div>` : "";
     const retryBtn = j.status === "error"
       ? `<button class="ghost sm" onclick="doRetry('${j.id}')">재시도</button>` : "";
     html += `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
