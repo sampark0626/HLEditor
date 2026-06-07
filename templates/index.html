@@ -179,12 +179,37 @@ input[type=range] { flex:1; accent-color:var(--blue); }
       <label class="hint" style="margin:0;white-space:nowrap">Gemini 병렬 수
         <input type="number" id="workers" min="1" max="8" value="{{ workers }}" style="margin-left:6px">
       </label>
-      <button id="btn-add" onclick="doAdd()">큐에 추가 &amp; 자동 처리 시작</button>
+    </div>
+    <!-- 처리 방식 버튼 -->
+    <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap">
+      <button id="btn-add" onclick="doAdd()">큐에 추가</button>
+      <button id="btn-onestop-yt" onclick="doOnestop('youtube')"
+        class="accent-btn"
+        title="검출 → 생성 → YouTube 업로드까지 자동 진행{% if not yt_auth %} (YouTube 인증 필요){% endif %}"
+        {% if not yt_auth %}disabled{% endif %}>
+        YouTube까지 원스톱
+      </button>
+      <button id="btn-onestop-band" onclick="doOnestop('band')"
+        style="background:var(--purple);color:#fff"
+        title="검출 → 생성 → YouTube → BAND 게시까지 자동 진행{% if not band_auth %} (BAND 인증 필요){% endif %}"
+        {% if not band_auth %}disabled{% endif %}>
+        BAND까지 원스톱
+      </button>
     </div>
     <div class="hint" style="margin-top:6px">
       각 영상의 민감도를 개별 설정할 수 있습니다.
-      추가 즉시 검출 → 비전 판별 순으로 자동 실행됩니다.
+      원스톱: 추가 즉시 검출 → AI 판별 → 영상 생성 → 업로드/게시까지 완전 자동.
     </div>
+  </div>
+
+  <!-- 원스톱 파이프라인 진행 바 -->
+  <div id="pipe-bar" style="display:none;background:#0d2248;border:1px solid var(--blue);border-radius:10px;padding:12px 16px;margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:700;color:var(--blue)" id="pipe-mode-label"></span>
+      <button class="ghost sm" onclick="cancelPipeline()">취소</button>
+    </div>
+    <div style="display:flex;gap:0;align-items:center" id="pipe-steps"></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)" id="pipe-detail"></div>
   </div>
 
   <!-- 처리 현황 -->
@@ -362,6 +387,12 @@ let bandList = [];   // [{band_key, name, member_count}]
 let bandListLoaded = false;
 let autoUpload   = false;
 let autoUploaded = new Set();   // 자동 업로드 트리거한 jid 추적
+
+// ─── 원스톱 파이프라인 상태 ──────────────────────────────
+// _pipe: null | { mode:"youtube"|"band", jobIds:Set, step:string, stepAt:number }
+// step: "processing" → "building" → "uploading" → "posting" → "done"
+let _pipe = null;
+const PIPE_STEP_DELAY = 3000; // 단계 전환 후 안정화 대기 (ms)
 
 // ─── localStorage 영속화 ─────────────────────────────────
 const LS = {
@@ -566,6 +597,189 @@ async function doAdd() {
   finally { btn.disabled = false; }
 }
 
+// ─── 원스톱 파이프라인 ──────────────────────────────────
+
+// 버튼 잠금/해제
+function _pipeBtns(disabled) {
+  ["btn-add","btn-onestop-yt","btn-onestop-band"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+}
+
+// 파이프라인 시작
+async function doOnestop(mode) {
+  if (!staged.length) syncStaged();
+  const toAdd = staged.filter(s => !s.dup);
+  if (!toAdd.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
+  if (mode === "youtube" && !ytAuth) { alert("YouTube 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
+  if (mode === "band"    && !bandAuth) { alert("BAND 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
+  if (_pipe) { if (!confirm("진행 중인 파이프라인을 취소하고 새로 시작할까요?")) return; cancelPipeline(true); }
+
+  const workers = parseInt(document.getElementById("workers").value) || 6;
+  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers}));
+  _pipeBtns(true);
+  try {
+    const d = await post("/api/jobs/add", {jobs, workers});
+    if (!d.added?.length) { logLine("추가 실패", "fail"); _pipeBtns(false); return; }
+    _pipe = { mode, jobIds: new Set(d.added.map(j => j.id)), step: "processing", stepAt: Date.now() };
+    clearStaged();
+    const modeLabel = mode === "band" ? "BAND까지 원스톱" : "YouTube까지 원스톱";
+    logLine(`[원스톱] ${d.added.length}개 추가 — ${modeLabel} 시작`, "start");
+    renderPipeBar();
+  } catch(e) { logLine("원스톱 오류: " + e.message, "fail"); _pipeBtns(false); }
+}
+
+function cancelPipeline(silent) {
+  _pipe = null;
+  _pipeBtns(false);
+  document.getElementById("pipe-bar").style.display = "none";
+  if (!silent) logLine("[원스톱] 파이프라인 취소됨", "fail");
+}
+
+function _pipeSetStep(step) {
+  _pipe.step = step;
+  _pipe.stepAt = Date.now();
+  renderPipeBar();
+}
+
+// 파이프라인 완료
+function _pipeDone() {
+  _pipe = null;
+  _pipeBtns(false);
+  setTimeout(() => {
+    const el = document.getElementById("pipe-bar");
+    if (el) el.style.display = "none";
+  }, 8000);  // 8초 후 숨김
+}
+
+// 파이프라인 상태 바 렌더링
+function renderPipeBar() {
+  const bar = document.getElementById("pipe-bar");
+  if (!bar || !_pipe) { if (bar) bar.style.display = "none"; return; }
+  bar.style.display = "block";
+
+  const modeLabel = _pipe.mode === "band" ? "BAND까지 원스톱" : "YouTube까지 원스톱";
+  document.getElementById("pipe-mode-label").textContent = "▶ " + modeLabel;
+
+  const STEPS = _pipe.mode === "band"
+    ? ["processing","building","uploading","posting","done"]
+    : ["processing","building","uploading","done"];
+  const LABELS = { processing:"처리 중", building:"영상 생성", uploading:"YouTube 업로드", posting:"BAND 게시", done:"완료" };
+
+  const stepIdx = STEPS.indexOf(_pipe.step);
+  const stepsEl = document.getElementById("pipe-steps");
+  stepsEl.innerHTML = STEPS.map((s, i) => {
+    const past    = i < stepIdx;
+    const current = i === stepIdx;
+    const color   = _pipe.step === "done" ? "var(--accent)" : (current ? "var(--blue)" : (past ? "var(--accent)" : "var(--rej)"));
+    const weight  = current ? "700" : "400";
+    const prefix  = past ? "✓ " : (current && _pipe.step !== "done" ? `<span class="spin"></span>` : "");
+    const arrow   = i < STEPS.length - 1 ? `<span style="color:var(--rej);margin:0 6px;font-size:11px">→</span>` : "";
+    return `<span style="color:${color};font-weight:${weight};font-size:12px">${prefix}${LABELS[s]}</span>${arrow}`;
+  }).join("");
+}
+
+// 폴링 사이클마다 파이프라인 상태 점검 및 다음 단계 전환
+async function advancePipeline(jobs) {
+  if (!_pipe) return;
+  const { mode, jobIds, step, stepAt } = _pipe;
+  const pJobs = jobs.filter(j => jobIds.has(j.id));
+  if (!pJobs.length) return;
+
+  renderPipeBar();
+
+  // 단계 전환 직후 안정화 대기
+  const elapsed = Date.now() - stepAt;
+
+  // ── step: processing ─────────────────────────────────
+  if (step === "processing") {
+    const active = pJobs.filter(j => ["pending","detecting","classifying"].includes(j.status));
+    if (active.length > 0) {
+      document.getElementById("pipe-detail").textContent =
+        `처리 중: ${active.length}개 남음 (${pJobs.filter(j => j.status==="ready").length}개 완료)`;
+      return;
+    }
+    if (elapsed < PIPE_STEP_DELAY) return;
+
+    const ready = pJobs.filter(j => ["ready","done"].includes(j.status));
+    if (!ready.length) { logLine("[원스톱] 모든 영상 처리 오류 — 파이프라인 중단", "fail"); _pipeDone(); return; }
+
+    _pipeSetStep("building");
+    logLine(`[원스톱] 처리 완료 (${ready.length}개) → AI 판단 자동 승인 & 영상 생성`, "start");
+    try {
+      const conf = parseFloat(document.getElementById("global-conf")?.value) || {{ conf_auto }};
+      await post("/api/jobs/approve-all", {conf});
+
+      const quality = document.getElementById("hl-quality")?.value || "balanced";
+      const titles = {}, outputs = {};
+      ready.forEach(j => {
+        titles[j.id]  = ytTitleFor(j.id, buildData[j.id]?.title || "한울타리 FC 경기영상");
+        outputs[j.id] = buildData[j.id]?.output || "";
+      });
+      await post("/api/jobs/build-all", {quality, titles, outputs});
+    } catch(e) { logLine("[원스톱] 생성 요청 오류: " + e.message, "fail"); _pipeDone(); }
+
+  // ── step: building ───────────────────────────────────
+  } else if (step === "building") {
+    const building = pJobs.filter(j => j.status === "building");
+    const notBuilt  = pJobs.filter(j => ["ready","pending","detecting","classifying"].includes(j.status));
+    if (building.length > 0 || (elapsed < PIPE_STEP_DELAY && notBuilt.length > 0)) {
+      document.getElementById("pipe-detail").textContent =
+        `영상 생성 중: ${building.length + notBuilt.length}개 남음`;
+      return;
+    }
+    if (elapsed < PIPE_STEP_DELAY) return;
+
+    const done = pJobs.filter(j => j.status === "done" && j.output);
+    if (!done.length) { logLine("[원스톱] 영상 생성 실패 — 파이프라인 중단", "fail"); _pipeDone(); return; }
+
+    _pipeSetStep("uploading");
+    logLine(`[원스톱] 생성 완료 (${done.length}개) → YouTube 업로드 시작`, "start");
+    try {
+      const titles = {};
+      done.forEach(j => { titles[j.id] = ytTitleFor(j.id, buildData[j.id]?.title || "한울타리 FC 경기영상"); });
+      await post("/api/jobs/upload-all-youtube", {titles});
+    } catch(e) { logLine("[원스톱] 업로드 요청 오류: " + e.message, "fail"); _pipeDone(); }
+
+  // ── step: uploading ──────────────────────────────────
+  } else if (step === "uploading") {
+    const outputJobs = pJobs.filter(j => j.status === "done" && j.output);
+    const uploading  = outputJobs.filter(j => j.yt_status === "uploading");
+    const pending    = outputJobs.filter(j => !j.yt_status);
+    if (uploading.length > 0 || (elapsed < PIPE_STEP_DELAY && pending.length > 0)) {
+      document.getElementById("pipe-detail").textContent =
+        `업로드 중: ${uploading.length + pending.length}개 남음`;
+      return;
+    }
+    if (elapsed < PIPE_STEP_DELAY) return;
+
+    const uploaded = outputJobs.filter(j => j.yt_status === "done");
+    if (!uploaded.length) { logLine("[원스톱] YouTube 업로드 실패 — 파이프라인 중단", "fail"); _pipeDone(); return; }
+
+    if (mode === "band") {
+      _pipeSetStep("posting");
+      logLine(`[원스톱] 업로드 완료 (${uploaded.length}개) → BAND 게시 시작`, "start");
+      try {
+        const d = await post("/api/jobs/post-band", {});  // band_key 없으면 .env의 BAND_TARGET_KEY 사용
+        const n = (d.posted||[]).reduce((s,p) => s+p.n, 0);
+        logLine(`[원스톱] BAND 게시 완료: ${n}개 링크`, "done");
+        sendNotif("원스톱 완료", "YouTube 업로드 및 BAND 게시가 완료되었습니다.");
+        (d.errors||[]).forEach(e2 => logLine(`BAND 오류: ${e2.error}`, "fail"));
+      } catch(e) { logLine("[원스톱] BAND 게시 오류: " + e.message, "fail"); }
+      _pipeSetStep("done");
+      document.getElementById("pipe-detail").textContent = "모든 단계 완료!";
+      _pipeDone();
+    } else {
+      _pipeSetStep("done");
+      document.getElementById("pipe-detail").textContent = `${uploaded.length}개 영상 YouTube 업로드 완료!`;
+      logLine(`[원스톱] YouTube까지 완료! (${uploaded.length}개)`, "done");
+      sendNotif("원스톱 완료", `${uploaded.length}개 영상이 YouTube에 업로드되었습니다.`);
+      _pipeDone();
+    }
+  }
+}
+
 // ─── 폴링 ───────────────────────────────────────────────
 async function poll() {
   try {
@@ -574,6 +788,7 @@ async function poll() {
     allJobs = jobs;
     updateBadges();
     checkAutoUpload();
+    await advancePipeline(jobs);  // 원스톱 파이프라인 상태 점검
     if (activePne === "queue")  renderQueue();
     if (activePne === "review") renderReview();
     if (activePne === "build")  renderBuild();
