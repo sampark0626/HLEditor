@@ -9,15 +9,19 @@
 ## 동작 구조
 
 ```
-[영상 추가] → 오디오 분석(spike 검출) → Gemini 비전 판별(병렬)
-           → 리뷰(구간 확인·조정) → 하이라이트 영상 생성
-           → YouTube 업로드(썸네일·챕터 자동) → BAND 게시(날짜별 묶음)
+[영상 추가]
+   │
+   ├─ 수동 모드 ──▶ 오디오 분석 → Gemini 비전 판별 → 리뷰 → 영상 생성 → YouTube 업로드 → BAND 게시
+   │
+   └─ 원스톱 ────▶ 오디오 분석 → Gemini 비전 판별 → 자동 승인 → 영상 생성 → YouTube 업로드 [→ BAND 게시]
+                                                                          (버튼 한 번으로 전체 자동)
 ```
 
 - **1차 (오디오)**: 골·환호 등 볼륨 급증 시점을 rolling baseline 대비 상대 상승폭으로 검출. 빠르고 무료.
 - **2차 (비전)**: 후보 구간 프레임을 Gemini에 전송해 유형·신뢰도 판별. 정확하지만 유료.
+- **탈중복**: 실제 잘라낼 구간이 2초 이상 겹치면 볼륨 변화가 더 큰 구간만 유지.
 - **리뷰**: 신뢰도 슬라이더로 채택 기준을 조정하고 구간별 AI 설명을 확인.
-- **생성·배포**: 선택 구간을 ffmpeg로 이어붙여 하이라이트 영상 생성 → YouTube 업로드 → BAND 게시.
+- **생성·배포**: 선택 구간을 ffmpeg로 이어붙여 하이라이트 영상 생성 → YouTube 업로드(챕터·썸네일 자동) → BAND 게시.
 
 ---
 
@@ -26,7 +30,7 @@
 | 파일 | 설명 |
 |------|------|
 | `app.py` | Flask 웹 서버 · 배치 잡 관리 · OAuth 인증 엔드포인트 |
-| `soccer_highlights.py` | 오디오 분석 · Gemini 비전 판별 · 영상 생성 파이프라인 |
+| `soccer_highlights.py` | 오디오 분석 · Gemini 비전 판별 · 탈중복 · 영상 생성 파이프라인 |
 | `youtube_uploader.py` | YouTube OAuth 2.0 · 영상 업로드 · 썸네일 추출 · 챕터 설명 생성 |
 | `band_poster.py` | BAND OAuth 2.0 · 날짜별 게시글 작성 |
 | `.env` | API 키·OAuth 설정 (git 제외, `.env.example` 참고) |
@@ -53,9 +57,11 @@ pip install -r requirements.txt
 
 `ffmpeg` / `ffprobe` 가 PATH에 있어야 합니다.
 
-- **Windows**: `winget install Gyan.FFmpeg` 또는 [ffmpeg.org](https://ffmpeg.org/download.html)에서 받아 PATH 등록
+- **Windows**: `winget install Gyan.FFmpeg` 또는 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)에서 `ffmpeg-release-essentials.zip` 다운로드 후 PATH 등록
 - **macOS**: `brew install ffmpeg`
 - **Ubuntu**: `sudo apt install ffmpeg`
+
+> ffmpeg가 없으면 앱 시작 시 터미널에 설치 안내가 출력되고, UI 상단에 경고 배너가 표시됩니다.
 
 ### 2) 환경 설정
 
@@ -96,9 +102,17 @@ python app.py
 
 1. **파일 선택** 버튼 또는 경로를 직접 입력 (여러 줄 가능)
 2. 영상별로 **민감도**(많이 잡기 / 보통 / 엄선)를 개별 설정하거나 일괄 변경
-3. **큐에 추가 & 자동 처리 시작** — 추가 즉시 오디오 분석 → 비전 판별 순으로 순차 자동 실행
-4. 처리 현황에서 진행률·예상 잔여 시간·비용 확인
-5. 오류 발생 시 **재시도** 버튼으로 재처리
+3. 처리 방식 선택:
+
+| 버튼 | 동작 |
+|------|------|
+| **큐에 추가** | 추가 후 수동으로 리뷰·생성·업로드 진행 |
+| **YouTube까지 원스톱** | 추가 → 검출 → AI 판별 → 자동 승인 → 영상 생성 → YouTube 업로드 (완전 자동) |
+| **BAND까지 원스톱** | 위 전체 + BAND 게시 (완전 자동) |
+
+4. 원스톱 진행 중에는 단계별 진행 바가 표시되며 **취소** 버튼으로 중단 가능
+5. 처리 현황에서 진행률·예상 잔여 시간·비용 확인
+6. 오류 발생 시 **재시도** 버튼으로 재처리
 
 > 처리 완료 시 브라우저 데스크톱 알림을 받으려면 알림 권한을 허용하세요.
 
@@ -116,9 +130,9 @@ python app.py
 
 1. **인증 상태 카드** — YouTube / BAND 인증 여부 확인 및 인증 진행
 2. 품질(용량 우선 / 균형 / 화질 우선 / 초고속 복사) 선택 후 **일괄 생성**
-3. 생성 완료 영상별로 **업로드** 버튼 → YouTube에 자동 업로드
-   - 썸네일: 가장 신뢰도 높은 구간의 원본 프레임 자동 추출
-   - 설명: 하이라이트 내 챕터 타임스탬프 + AI 설명 자동 생성
+3. 생성 완료 영상별로 **업로드** 버튼 → YouTube에 업로드
+   - 썸네일: 신뢰도 가장 높은 구간의 원본 프레임 자동 추출
+   - 설명: **득점(goal) 구간만** 챕터 타임스탬프로 표기
    - 제목: `베이스 | 영상명 | 날짜` 형식으로 영상별 자동 차별화
 4. **생성 후 자동 YouTube 업로드** 옵션 켜면 생성 완료 즉시 자동 업로드
 5. YouTube 업로드 완료 후 **BAND에 게시** → 같은 날짜 영상 링크를 한 게시글에 묶어 게시
@@ -145,7 +159,10 @@ python app.py
 2. Redirect URI: `http://localhost:5000/auth/band/callback`
 3. Privacy Policy URL: `https://raw.githubusercontent.com/sampark0626/HLEditor/main/PRIVACY.md`
 4. 발급된 Client ID / Secret을 `.env`에 입력
-5. 앱 실행 → **영상 생성 탭 → BAND 인증** 버튼 → BAND 로그인
+5. `BAND_TARGET_KEY`: 게시할 밴드의 key (BAND 앱 → 설정에서 확인)를 `.env`에 입력
+6. 앱 실행 → **영상 생성 탭 → BAND 인증** 버튼 → BAND 로그인
+
+`BAND_TARGET_KEY`가 설정되어 있으면 원스톱 버튼에서 밴드 선택 없이 자동 게시됩니다.
 
 ---
 
@@ -156,6 +173,8 @@ python app.py
 | 많이 잡기 | 많음 | 골·장면이 적은 수비적 경기 |
 | 보통 (기본) | 적당 | 일반적인 동호회 경기 |
 | 엄선 | 적음 | 환호가 크고 뚜렷한 경기 |
+
+겹치는 구간 처리: 두 후보의 영상 구간(각 13초)이 **2초 이상 겹치면** 볼륨 변화가 더 큰 쪽만 남깁니다. `soccer_highlights.py`의 `OVERLAP_MAX_SEC`로 조정 가능합니다.
 
 ---
 
@@ -171,7 +190,8 @@ python app.py
 
 - `client_secrets.json`, `youtube_token.json`, `band_token.json`, `.env`는 `.gitignore`에 등록되어 있어 git에 올라가지 않습니다.
 - YouTube 업로드는 본인 채널에만 가능합니다. 썸네일 업로드는 채널 전화번호 인증이 필요할 수 있습니다.
-- BAND 게시는 수동 확인 후 진행하는 방식으로, 자동·예약 게시는 없습니다.
+- 원스톱 BAND 게시는 `.env`의 `BAND_TARGET_KEY`를 사용합니다. 설정되지 않은 경우 영상 생성 탭에서 수동 게시하세요.
+- ffmpeg가 PATH에 없으면 영상 처리가 실패합니다. 오류 발생 시 앱 상단 배너의 설치 안내를 따르세요.
 
 ---
 
