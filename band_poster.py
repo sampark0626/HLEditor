@@ -189,10 +189,10 @@ def format_post_content(
     else:
         date_str = datetime.today().strftime("%Y년 %m월 %d일")
 
-    lines = [f"⚽ {date_str} 경기 하이라이트 영상입니다.", ""]
+    lines = [f"{date_str} 경기 하이라이트 영상입니다.", ""]
     for name, url in video_links:
         base = name.rsplit(".", 1)[0]
-        lines.append(f"📹 {base}")
+        lines.append(f"· {base}")
         lines.append(url)
         lines.append("")
     lines.append("HLEditor 자동 생성")

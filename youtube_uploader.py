@@ -186,7 +186,7 @@ def generate_description(
     base_name = video_name.rsplit(".", 1)[0]
     seg_dur = pre_sec + post_sec  # 각 구간 길이 (초)
 
-    lines = [f"⚽ 축구 하이라이트 — {base_name}", ""]
+    lines = [f"축구 하이라이트 — {base_name}", ""]
 
     cumulative = 0.0
     sorted_approved = sorted(approved)

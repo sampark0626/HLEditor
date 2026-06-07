@@ -111,7 +111,7 @@ input[type=range] { flex:1; accent-color:var(--blue); }
 <body>
 
 <header>
-  <h1>⚽ 축구 하이라이트 추출기</h1>
+  <h1>축구 하이라이트 추출기</h1>
   <span class="sub">배치 처리 · 음성 급증 + Gemini 비전 판별</span>
   {% if not has_key %}<span class="nokey">⚠ GEMINI_API_KEY 없음 (.env 확인)</span>{% endif %}
 </header>
@@ -127,7 +127,6 @@ input[type=range] { flex:1; accent-color:var(--blue); }
 
   <!-- 알림 권한 바 -->
   <div id="notif-bar" style="display:none">
-    <span style="color:var(--purple)">🔔</span>
     <span>처리 완료 알림을 받으시겠습니까?</span>
     <button onclick="requestNotif()" style="background:var(--purple);padding:4px 12px;font-size:12px">알림 허용</button>
     <button class="ghost sm" onclick="document.getElementById('notif-bar').style.display='none'">닫기</button>
@@ -207,7 +206,7 @@ input[type=range] { flex:1; accent-color:var(--blue); }
       </div>
       <button class="accent-btn" onclick="bulkSaveAndBuild()"
         title="AI 판단을 그대로 반영해 전체 저장 후 영상 생성 시작">
-        ⚡ AI 판단으로 전체 저장 &amp; 영상 생성
+        AI 판단으로 전체 저장 &amp; 영상 생성
       </button>
     </div>
     <div class="hint" style="margin-top:6px">
@@ -230,7 +229,6 @@ input[type=range] { flex:1; accent-color:var(--blue); }
     <div class="row" style="gap:20px; flex-wrap:wrap">
       <!-- YouTube -->
       <div style="display:flex;align-items:center;gap:8px;min-width:220px">
-        <span style="font-size:14px">▶</span>
         <span style="font-size:13px;font-weight:600">YouTube</span>
         <span id="yt-auth-badge" class="st {% if yt_auth %}st-done{% else %}st-error{% endif %}">
           {% if yt_auth %}인증됨{% elif yt_has_secrets %}미인증{% else %}설정 필요{% endif %}
@@ -246,7 +244,6 @@ input[type=range] { flex:1; accent-color:var(--blue); }
       </div>
       <!-- BAND -->
       <div style="display:flex;align-items:center;gap:8px;min-width:220px">
-        <span style="font-size:14px">📣</span>
         <span style="font-size:13px;font-weight:600">BAND</span>
         <span id="band-auth-badge" class="st {% if band_auth %}st-done{% else %}st-error{% endif %}">
           {% if band_auth %}인증됨{% elif band_has_creds %}미인증{% else %}설정 필요{% endif %}
@@ -277,7 +274,7 @@ input[type=range] { flex:1; accent-color:var(--blue); }
       </label>
       <button id="btn-build-all" onclick="doBuildAll()">선택된 영상 일괄 생성</button>
       <button id="btn-upload-all" class="ghost" onclick="doUploadAll()"
-        title="완료된 모든 영상을 YouTube에 업로드">▶ YouTube 전체 업로드</button>
+        title="완료된 모든 영상을 YouTube에 업로드">YouTube 전체 업로드</button>
     </div>
     <div class="row" style="margin-top:8px; gap:16px; flex-wrap:wrap">
       <label class="hint" style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -304,7 +301,7 @@ input[type=range] { flex:1; accent-color:var(--blue); }
           <option value="">-- 선택 --</option>
         </select>
       </label>
-      <button onclick="doPostBand()">📣 BAND에 게시</button>
+      <button onclick="doPostBand()">BAND에 게시</button>
       <button class="ghost sm" onclick="loadBands()">↺ 밴드 목록 새로고침</button>
     </div>
     <div id="band-post-preview" class="hint" style="font-size:11px;white-space:pre-wrap;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:8px;max-height:120px;overflow-y:auto"></div>
@@ -411,12 +408,12 @@ function checkNotifications(jobs) {
     if (!prev) { prevStatuses[j.id] = j.status; continue; }
     if (prev !== j.status) {
       if (j.status === "ready") {
-        sendNotif("⚽ 판별 완료", `${j.video_name} — 리뷰 탭에서 확인하세요`);
-        logLine(`🔔 ${j.video_name} 판별 완료`, "done");
+        sendNotif("판별 완료", `${j.video_name} — 리뷰 탭에서 확인하세요`);
+        logLine(`${j.video_name} 판별 완료`, "done");
       } else if (j.status === "done") {
-        sendNotif("🎬 영상 생성 완료", j.video_name);
+        sendNotif("영상 생성 완료", j.video_name);
       } else if (j.status === "error") {
-        sendNotif("❌ 오류 발생", j.video_name);
+        sendNotif("오류 발생", j.video_name);
       }
     }
     if (["pending","detecting","classifying","building"].includes(j.status)) hasProcessing = true;
@@ -426,7 +423,7 @@ function checkNotifications(jobs) {
   if (wasProcessing && !hasProcessing && jobs.length > 0) {
     const done  = jobs.filter(j => j.status === "ready").length;
     const error = jobs.filter(j => j.status === "error").length;
-    sendNotif("✅ 전체 처리 완료",
+    sendNotif("전체 처리 완료",
       `${done}개 준비됨${error ? ` / ${error}개 오류` : ""} — 리뷰 탭을 확인하세요`);
   }
   wasProcessing = hasProcessing;
@@ -956,7 +953,7 @@ async function saveApproved(jid) {
       // 모두 저장 완료
       renderReview();
       logLine("모든 영상 저장 완료 → 영상 생성 탭으로 이동합니다.", "done");
-      sendNotif("📋 리뷰 완료", "모든 영상 저장 완료. 영상 생성을 시작하세요.");
+      sendNotif("리뷰 완료", "모든 영상 저장 완료. 영상 생성을 시작하세요.");
       setTimeout(() => go("build"), 600);
     }
   } catch(e) { logLine("저장 실패: " + e.message, "fail"); }
@@ -1143,15 +1140,15 @@ function updatePipelineSummary(jobs) {
   const bandDone  = jobs.filter(j => j.band_status === "done").length;
 
   const parts = [];
-  parts.push(`<span>🎬 생성 <b class="qs-done">${builtDone}</b>/${jobs.length}` +
-             (building ? ` <span class="qs-proc">(생성중 ${building})</span>` : "") + `</span>`);
+  parts.push(`<span>생성 <b class="qs-done">${builtDone}</b>/${jobs.length}` +
+             (building ? ` <span class="qs-proc">(진행중 ${building})</span>` : "") + `</span>`);
   if (ytAuth) {
-    parts.push(`<span>▶ 업로드 <b class="qs-done">${ytDone}</b>/${jobs.length}` +
+    parts.push(`<span>YouTube 업로드 <b class="qs-done">${ytDone}</b>/${jobs.length}` +
                (ytUp  ? ` <span class="qs-proc">(업로드중 ${ytUp})</span>` : "") +
                (ytErr ? ` <span style="color:var(--red)">(오류 ${ytErr})</span>` : "") + `</span>`);
   }
   if (bandAuth) {
-    parts.push(`<span>📣 게시 <b class="qs-done">${bandDone}</b>/${ytDone || 0}</span>`);
+    parts.push(`<span>BAND 게시 <b class="qs-done">${bandDone}</b>/${ytDone || 0}</span>`);
   }
   el.innerHTML = parts.join("");
 }
@@ -1390,8 +1387,8 @@ function updateBandPreview() {
   for (const [d, pairs] of Object.entries(groups)) {
     const dt = new Date(d + "T00:00:00");
     const ds = `${dt.getFullYear()}년 ${dt.getMonth()+1}월 ${dt.getDate()}일`;
-    text += `⚽ ${ds} 경기 하이라이트 영상입니다.\n\n`;
-    pairs.forEach(([n, u]) => { text += `📹 ${n}\n${u}\n\n`; });
+    text += `${ds} 경기 하이라이트 영상입니다.\n\n`;
+    pairs.forEach(([n, u]) => { text += `· ${n}\n${u}\n\n`; });
     text += "HLEditor 자동 생성\n\n---\n";
   }
   prev.textContent = text.trim();
@@ -1416,7 +1413,7 @@ async function doPostBand() {
       ).join("<br>");
     (d.errors||[]).forEach(e => logLine(`BAND 오류 ${e.date}: ${e.error}`, "fail"));
     lastBuildHash = "";
-    sendNotif("📣 BAND 게시 완료", `${n}개 영상 링크가 BAND에 게시되었습니다.`);
+    sendNotif("BAND 게시 완료", `${n}개 영상 링크가 BAND에 게시되었습니다.`);
   } catch(e) {
     if (resultEl) resultEl.innerHTML = `<span style="color:var(--red);font-size:12px">오류: ${esc(e.message)}</span>`;
     logLine("BAND 게시 실패: " + e.message, "fail");
