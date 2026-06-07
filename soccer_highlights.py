@@ -45,6 +45,7 @@ BASELINE_SEC   = 20.0   # rolling baseline 추정 구간 (초)
 SPIKE_PERCENTILE = 95   # delta 분포 상위 몇 %를 spike로 볼지 (높을수록 후보 적음)
 SPIKE_MIN_DB   = 8.0    # baseline 대비 최소 상승폭 (dB). 절대 하한
 MERGE_GAP_SEC  = 4.0    # 이 간격 이내 spike는 한 장면으로 병합
+OVERLAP_MAX_SEC = 2.0   # 실제 잘라낼 구간이 이 초 이상 겹치면 delta_db 높은 쪽만 유지
 
 PRE_SEC        = 8.0    # 급증(peak) 시점 기준 앞으로 포함할 길이 (초)
 POST_SEC       = 5.0    # 급증 시점 기준 뒤로 포함할 길이 (초)
@@ -182,7 +183,7 @@ def detect_spikes(video, workdir, percentile=None, min_db=None):
         else:
             i += 1
 
-    # 인접 spike 병합
+    # 인접 spike 병합 (peak 간격 기준)
     merged = []
     for s in spikes:
         if merged and s[0] - merged[-1][1] < MERGE_GAP_SEC:
@@ -192,8 +193,27 @@ def detect_spikes(video, workdir, percentile=None, min_db=None):
         else:
             merged.append(s)
 
+    # 구간 겹침 탈중복: 실제 잘라낼 세그먼트(peak ± PRE/POST)가 OVERLAP_MAX_SEC 초 초과
+    # 겹치면 delta_db 높은 쪽 peak만 남긴다.
+    # 예) PRE=8, POST=5 → 13초 구간. peak 간격 11초 미만이면 2초 이상 겹침.
+    deduped = []
+    for s in merged:
+        if not deduped:
+            deduped.append(s)
+            continue
+        prev = deduped[-1]
+        # 구간 겹침량 = (prev_peak + POST_SEC) - (curr_peak - PRE_SEC)
+        overlap = (prev[2] + POST_SEC) - (s[2] - PRE_SEC)
+        if overlap > OVERLAP_MAX_SEC:
+            # 겹침이 큼 → 더 강한 spike(delta_db 높은 것)의 peak만 유지
+            if s[3] > prev[3]:
+                deduped[-1] = s   # 현재 것이 더 강하면 교체
+            # else: 이전 것이 더 강하므로 그냥 버림
+        else:
+            deduped.append(s)
+
     return [{"start": m[0], "end": m[1], "peak": m[2], "delta_db": m[3]}
-            for m in merged]
+            for m in deduped]
 
 
 # ----------------------------------------------------------------------------

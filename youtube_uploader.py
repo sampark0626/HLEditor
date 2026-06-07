@@ -188,36 +188,46 @@ def generate_description(
 ) -> str:
     """
     승인된 후보 구간으로 YouTube 챕터 마커 설명 생성.
-    타임스탬프는 하이라이트 영상 내 누적 위치 기준.
+    - 챕터 표기: type == 'goal' 인 구간만 표시
+    - 타임스탬프: 하이라이트 영상 내 누적 위치 기준 (비-goal 구간도 시간은 누적)
     """
     base_name = video_name.rsplit(".", 1)[0]
     seg_dur = pre_sec + post_sec  # 각 구간 길이 (초)
 
     lines = [f"축구 하이라이트 — {base_name}", ""]
 
+    goal_lines = []
     cumulative = 0.0
-    sorted_approved = sorted(approved)
-    for rank, idx in enumerate(sorted_approved):
+    goal_count = 0
+
+    for idx in sorted(approved):
         if idx >= len(candidates):
+            cumulative += seg_dur
             continue
         c = candidates[idx]
-        peak   = float(c.get("peak", 0))
-        reason = (c.get("reason") or "").strip()
-        ctype  = c.get("type", "")
-        conf   = float(c.get("confidence") or 0)
+        peak  = float(c.get("peak", 0))
+        ctype = (c.get("type") or "").strip().lower()
 
-        mins = int(cumulative // 60)
-        secs = int(cumulative % 60)
-        ts_hl = f"{mins}:{secs:02d}"
+        if ctype == "goal":
+            goal_count += 1
+            mins = int(cumulative // 60)
+            secs = int(cumulative % 60)
+            ts_hl = f"{mins}:{secs:02d}"
 
-        orig_min = int(peak // 60)
-        orig_sec = int(peak % 60)
-        ts_orig  = f"{orig_min}:{orig_sec:02d}"
+            orig_min = int(peak // 60)
+            orig_sec = int(peak % 60)
+            ts_orig  = f"{orig_min}:{orig_sec:02d}"
 
-        label = reason if reason else (ctype if ctype else f"하이라이트 #{rank + 1}")
-        # YouTube 챕터: 0:00 형식
-        lines.append(f"{ts_hl} {label}  (원본 {ts_orig})")
+            reason = (c.get("reason") or "").strip()
+            label  = reason if reason else f"득점 #{goal_count}"
+            goal_lines.append(f"{ts_hl} {label}  (원본 {ts_orig})")
+
         cumulative += seg_dur
+
+    if goal_lines:
+        lines += goal_lines
+    else:
+        lines.append("(득점 장면 없음)")
 
     lines += [
         "",
