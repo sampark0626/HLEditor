@@ -331,20 +331,37 @@ input[type=range] { flex:1; accent-color:var(--blue); }
     <div class="hint" style="padding:24px 0;text-align:center">승인된 영상이 없습니다.</div>
   </div>
 
-  <!-- BAND 게시 섹션 -->
+  <!-- BAND 게시 섹션 (YouTube 업로드 완료 시 항상 표시) -->
   <div class="card" id="band-post-card" style="display:none">
-    <div class="ct">BAND 게시 <span class="hint" style="text-transform:none;font-weight:400">(YouTube 업로드 완료된 영상만 · 같은 날짜끼리 한 게시글)</span></div>
-    <div class="row" style="gap:12px; flex-wrap:wrap; margin-bottom:8px">
-      <label class="hint" style="white-space:nowrap;margin:0">밴드 선택
-        <select id="band-sel" style="margin-left:6px;min-width:160px">
-          <option value="">-- 선택 --</option>
-        </select>
-      </label>
-      <button onclick="doPostBand()">BAND에 게시</button>
-      <button class="ghost sm" onclick="loadBands()">↺ 밴드 목록 새로고침</button>
+    <div class="ct">BAND 게시용 링크
+      <span class="hint" style="text-transform:none;font-weight:400">YouTube 업로드 완료된 영상 · 날짜별 묶음</span>
     </div>
-    <div id="band-post-preview" class="hint" style="font-size:11px;white-space:pre-wrap;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:8px;max-height:120px;overflow-y:auto"></div>
-    <div id="band-post-result" style="margin-top:8px"></div>
+
+    <!-- 게시 텍스트 미리보기 -->
+    <div id="band-post-preview" class="hint" style="font-size:12px;white-space:pre-wrap;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:10px 12px;max-height:200px;overflow-y:auto;line-height:1.7;margin-bottom:10px"></div>
+
+    <!-- 복사 버튼 (항상 표시) -->
+    <div class="row" style="gap:8px; flex-wrap:wrap; align-items:center">
+      <button id="btn-copy-band" onclick="copyBandText()" class="accent-btn">
+        게시 텍스트 복사
+      </button>
+      <span class="hint" style="font-size:11px">복사 후 BAND 앱에서 새 게시글에 붙여넣기</span>
+    </div>
+    <div id="band-copy-result" style="margin-top:6px;font-size:12px"></div>
+
+    <!-- BAND API 직접 게시 (인증된 경우만) -->
+    <div id="band-api-section" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+      <div class="row" style="gap:12px; flex-wrap:wrap">
+        <label class="hint" style="white-space:nowrap;margin:0">밴드 선택
+          <select id="band-sel" style="margin-left:6px;min-width:160px">
+            <option value="">-- 선택 --</option>
+          </select>
+        </label>
+        <button onclick="doPostBand()">BAND에 직접 게시</button>
+        <button class="ghost sm" onclick="loadBands()">↺ 목록 새로고침</button>
+      </div>
+      <div id="band-post-result" style="margin-top:8px"></div>
+    </div>
   </div>
 </div>
 
@@ -1591,11 +1608,16 @@ function updateBandCard() {
   const hasUploaded = allJobs.some(j => j.yt_status === "done" && j.yt_url);
   const bc = document.getElementById("band-post-card");
   if (!bc) return;
-  bc.style.display = bandAuth && hasUploaded ? "block" : "none";
+  // YouTube 업로드 완료된 것이 있으면 항상 표시 (BAND 인증 불필요)
+  bc.style.display = hasUploaded ? "block" : "none";
+  if (!hasUploaded) return;
 
-  if (!bandAuth || !hasUploaded) return;
-  if (!bandListLoaded) loadBands();
   updateBandPreview();
+
+  // BAND API 직접 게시 섹션: 인증된 경우만 표시
+  const apiSec = document.getElementById("band-api-section");
+  if (apiSec) apiSec.style.display = bandAuth ? "block" : "none";
+  if (bandAuth && !bandListLoaded) loadBands();
 }
 
 function updateBandPreview() {
@@ -1622,6 +1644,29 @@ function updateBandPreview() {
     text += "HLEditor 자동 생성\n\n---\n";
   }
   prev.textContent = text.trim();
+}
+
+async function copyBandText() {
+  const prev = document.getElementById("band-post-preview");
+  const text = prev?.textContent?.trim();
+  if (!text || text === "게시할 새 링크 없음") {
+    alert("복사할 링크가 없습니다. YouTube 업로드를 먼저 완료하세요."); return;
+  }
+  const resultEl = document.getElementById("band-copy-result");
+  try {
+    await navigator.clipboard.writeText(text);
+    resultEl.innerHTML = '<span style="color:var(--accent);font-weight:600">복사 완료!</span> <span class="hint">BAND 앱에서 새 게시글 작성 후 붙여넣기 하세요.</span>';
+    const btn = document.getElementById("btn-copy-band");
+    if (btn) { const orig = btn.textContent; btn.textContent = "복사됨"; setTimeout(() => { btn.textContent = orig; }, 2000); }
+  } catch(e) {
+    // 클립보드 API 불가 시 텍스트 선택
+    const range = document.createRange();
+    range.selectNodeContents(prev);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    resultEl.innerHTML = '<span class="hint">텍스트가 선택되었습니다. Ctrl+C로 복사하세요.</span>';
+  }
+  setTimeout(() => { if (resultEl) resultEl.innerHTML = ""; }, 5000);
 }
 
 async function doPostBand() {
