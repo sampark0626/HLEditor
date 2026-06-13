@@ -833,11 +833,72 @@ def _check_ffmpeg():
     return len(missing) == 0
 
 
+def _make_tray_icon():
+    """트레이 아이콘 이미지 생성 (녹색 원 + HL)."""
+    from PIL import Image, ImageDraw, ImageFont
+    sz = 64
+    img = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = 3
+    d.ellipse([pad, pad, sz - pad, sz - pad], fill=(40, 167, 69, 255))
+    font_size = int(sz * 0.40)
+    try:
+        font = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+    text = "HL"
+    try:
+        bbox = d.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except AttributeError:
+        tw, th = d.textsize(text, font=font)
+    tx = (sz - tw) // 2
+    ty = (sz - th) // 2 - 2
+    d.text((tx, ty), text, fill=(255, 255, 255, 255), font=font)
+    return img
+
+
+def _run_tray(url: str) -> None:
+    """시스템 트레이 아이콘 실행 (메인 스레드에서 호출)."""
+    import pystray
+
+    def open_browser(icon, item):
+        webbrowser.open(url)
+
+    def quit_app(icon, item):
+        icon.stop()
+        os._exit(0)
+
+    menu = pystray.Menu(
+        pystray.MenuItem("브라우저 열기", open_browser, default=True),
+        pystray.MenuItem("종료", quit_app),
+    )
+    icon = pystray.Icon("HLEditor", _make_tray_icon(), "HLEditor", menu)
+    icon.run()
+
+
 if __name__ == "__main__":
     _check_ffmpeg()
     worker_t = threading.Thread(target=_worker, daemon=True, name="hl-worker")
     worker_t.start()
     url = "http://127.0.0.1:5000"
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     print(f"\n  ▶ 하이라이트 추출기 UI: {url}\n")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+
+    try:
+        import pystray  # noqa: F401 — availability check
+        from PIL import Image  # noqa: F401
+
+        # Flask를 백그라운드 스레드로 실행, pystray를 메인 스레드에서 실행 (Windows 요구사항)
+        flask_t = threading.Thread(
+            target=lambda: app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False),
+            daemon=True,
+            name="hl-flask",
+        )
+        flask_t.start()
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+        print("  트레이 아이콘이 실행 중입니다. 작업 표시줄에서 HL 아이콘을 찾으세요.\n")
+        _run_tray(url)
+    except ImportError:
+        # pystray / Pillow 미설치 시 일반 모드로 실행
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        app.run(host="127.0.0.1", port=5000, debug=False)
