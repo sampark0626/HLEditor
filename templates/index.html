@@ -417,10 +417,20 @@ const LS = {
   set(k, v) { try { localStorage.setItem("hl_" + k, JSON.stringify(v)); } catch(e) {} },
 };
 function persistBuildData() { LS.set("buildData", buildData); }
+
+function _savePipe() {
+  if (!_pipe) { LS.set("pipe", null); return; }
+  LS.set("pipe", { mode: _pipe.mode, jobIds: [..._pipe.jobIds], step: _pipe.step, stepAt: _pipe.stepAt });
+}
+
 (function restoreState() {
   buildData  = LS.get("buildData", {}) || {};
   globalConf = LS.get("globalConf", CONF_AUTO);
   autoUpload = LS.get("autoUpload", false);
+  const saved = LS.get("pipe", null);
+  if (saved && saved.jobIds?.length && saved.step && saved.step !== "done") {
+    _pipe = { mode: saved.mode, jobIds: new Set(saved.jobIds), step: saved.step, stepAt: saved.stepAt || Date.now() };
+  }
 })();
 // DOM 준비 후 복원값 반영
 (function applyRestoredUI() {
@@ -640,6 +650,7 @@ async function doOnestop(mode) {
     const d = await post("/api/jobs/add", {jobs, workers});
     if (!d.added?.length) { logLine("추가 실패", "fail"); _pipeBtns(false); return; }
     _pipe = { mode, jobIds: new Set(d.added.map(j => j.id)), step: "processing", stepAt: Date.now() };
+    _savePipe();
     clearStaged();
     const modeLabel = mode === "band" ? "BAND까지 원스톱" : "YouTube까지 원스톱";
     logLine(`[원스톱] ${d.added.length}개 추가 — ${modeLabel} 시작`, "start");
@@ -649,6 +660,7 @@ async function doOnestop(mode) {
 
 function cancelPipeline(silent) {
   _pipe = null;
+  _savePipe();
   _pipeBtns(false);
   document.getElementById("pipe-bar").style.display = "none";
   if (!silent) logLine("[원스톱] 파이프라인 취소됨", "fail");
@@ -657,12 +669,14 @@ function cancelPipeline(silent) {
 function _pipeSetStep(step) {
   _pipe.step = step;
   _pipe.stepAt = Date.now();
+  _savePipe();
   renderPipeBar();
 }
 
 // 파이프라인 완료
 function _pipeDone() {
   _pipe = null;
+  _savePipe();
   _pipeBtns(false);
   setTimeout(() => {
     const el = document.getElementById("pipe-bar");
@@ -819,6 +833,8 @@ async function poll() {
   } catch(e) {}
 }
 setInterval(poll, 2000);
+// 페이지 로드 시 저장된 파이프라인 상태 복원
+if (_pipe) { _pipeBtns(true); renderPipeBar(); }
 poll();
 
 function updateBadges() {
