@@ -131,14 +131,18 @@ def probe_duration(video):
 
 
 # ----------------------------------------------------------------------------
-def detect_spikes(video, workdir, percentile=None, min_db=None):
+def detect_spikes(video, workdir, percentile=None, min_db=None,
+                  pre_sec=None, post_sec=None):
     """오디오를 추출하고 볼륨 급증 후보 구간을 반환.
 
     percentile/min_db: 지정 시 모듈 기본값(SPIKE_PERCENTILE/SPIKE_MIN_DB)을
         덮어쓴다. 값이 클수록 후보가 줄어든다(엄선).
+    pre_sec/post_sec: 구간 앞뒤 길이(초). 탈중복 계산에 사용.
     """
     percentile = SPIKE_PERCENTILE if percentile is None else percentile
     min_db = SPIKE_MIN_DB if min_db is None else min_db
+    pre_sec  = PRE_SEC  if pre_sec  is None else pre_sec
+    post_sec = POST_SEC if post_sec is None else post_sec
     wav = workdir / "audio.wav"
     run(["ffmpeg", "-y", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
          "-f", "wav", str(wav), "-loglevel", "error"])
@@ -202,8 +206,8 @@ def detect_spikes(video, workdir, percentile=None, min_db=None):
             deduped.append(s)
             continue
         prev = deduped[-1]
-        # 구간 겹침량 = (prev_peak + POST_SEC) - (curr_peak - PRE_SEC)
-        overlap = (prev[2] + POST_SEC) - (s[2] - PRE_SEC)
+        # 구간 겹침량 = (prev_peak + post_sec) - (curr_peak - pre_sec)
+        overlap = (prev[2] + post_sec) - (s[2] - pre_sec)
         if overlap > OVERLAP_MAX_SEC:
             # 겹침이 큼 → 더 강한 spike(delta_db 높은 것)의 peak만 유지
             if s[3] > prev[3]:
@@ -217,10 +221,12 @@ def detect_spikes(video, workdir, percentile=None, min_db=None):
 
 
 # ----------------------------------------------------------------------------
-def extract_frames(video, peak, workdir, idx):
+def extract_frames(video, peak, workdir, idx, pre_sec=None, post_sec=None):
     """후보 구간(peak 앞뒤)에서 프레임을 추출해 경로 리스트 반환."""
-    seg_start = max(0.0, peak - PRE_SEC)
-    seg_len = PRE_SEC + POST_SEC
+    pre_sec  = PRE_SEC  if pre_sec  is None else pre_sec
+    post_sec = POST_SEC if post_sec is None else post_sec
+    seg_start = max(0.0, peak - pre_sec)
+    seg_len = pre_sec + post_sec
     out_pat = workdir / f"cand{idx}_%03d.jpg"
     run(["ffmpeg", "-y", "-ss", f"{seg_start:.2f}", "-i", video,
          "-t", f"{seg_len:.2f}", "-vf", f"fps=1/{FRAME_INTERVAL},scale=640:-1",
@@ -313,7 +319,8 @@ def classify_with_gemini(frames, client):
 
 
 def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
-                          should_cancel=None, on_progress=None):
+                          should_cancel=None, on_progress=None,
+                          pre_sec=None, post_sec=None):
     """모든 후보에 대해 프레임 추출 + Gemini 판별을 병렬로 실행.
 
     후보 간 순서 의존성이 없으므로 ThreadPoolExecutor로 동시 처리한다.
@@ -333,7 +340,8 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
         # 프레임 추출(ffmpeg)도 후보 단위로 격리: 한 후보의 spawn 실패가
         # 배치 전체를 죽이지 않도록 한다.
         try:
-            frames = extract_frames(video, cand["peak"], workdir, idx)
+            frames = extract_frames(video, cand["peak"], workdir, idx,
+                                    pre_sec=pre_sec, post_sec=post_sec)
         except Exception as e:
             return idx, {"highlight": False, "type": "other", "confidence": 0.0,
                          "reason": f"frame_error: {str(e)[:80]}"}, None
@@ -412,7 +420,7 @@ def _drawtext_filter(title, font_name):
 
 def build_output(video, segments, out_path, workdir, title=None,
                  preset=None, crf=None, copy_mode=False, max_height=None,
-                 on_progress=None):
+                 on_progress=None, pre_sec=None, post_sec=None):
     """선택된 구간들을 잘라 이어붙여 최종 영상 생성.
 
     title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
@@ -445,11 +453,13 @@ def build_output(video, segments, out_path, workdir, title=None,
             filters.append(drawtext)
         vf = ",".join(filters) if filters else None
 
+    _pre  = PRE_SEC  if pre_sec  is None else pre_sec
+    _post = POST_SEC if post_sec is None else post_sec
     total = len(segments)
     clip_paths = []
     for i, seg in enumerate(segments):
-        start = max(0.0, seg["peak"] - PRE_SEC)
-        dur = PRE_SEC + POST_SEC
+        start = max(0.0, seg["peak"] - _pre)
+        dur = _pre + _post
         clip = workdir / f"clip{i:03d}.mp4"
         cmd = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", video,
                "-t", f"{dur:.2f}"]

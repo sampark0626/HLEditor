@@ -161,44 +161,91 @@ input[type=range] { flex:1; accent-color:var(--blue); }
     <div id="staged-area" style="display:none; margin-top:10px">
       <div class="ct" style="margin-bottom:6px">
         <span>추가 목록 <span id="staged-count" style="color:var(--txt)">0개</span></span>
-        <span style="display:flex;gap:6px;align-items:center;text-transform:none;font-weight:400">
-          <span class="hint" style="text-transform:none">전체 민감도 일괄</span>
-          <select id="bulk-sens" class="sens-sel" onchange="applyBulkSens(this.value)">
-            <option value="">— 선택 —</option>
-            {% for k, v in sensitivities.items() %}
-            <option value="{{ k }}">{{ v.label }}</option>
-            {% endfor %}
-          </select>
-          <button class="ghost sm" onclick="clearStaged()">목록 초기화</button>
-        </span>
+        <button class="ghost sm" onclick="clearStaged()">목록 초기화</button>
       </div>
       <div id="staged-list"></div>
     </div>
 
-    <div class="row" style="margin-top:10px; gap:16px; flex-wrap:wrap">
-      <label class="hint" style="margin:0;white-space:nowrap">Gemini 병렬 수
-        <input type="number" id="workers" min="1" max="8" value="{{ workers }}" style="margin-left:6px">
-      </label>
-    </div>
-    <!-- 처리 방식 버튼 -->
-    <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap">
-      <button id="btn-add" onclick="doAdd()">큐에 추가</button>
-      <button id="btn-onestop-yt" onclick="doOnestop('youtube')"
-        class="accent-btn"
-        title="검출 → 생성 → YouTube 업로드까지 자동 진행{% if not yt_auth %} (YouTube 인증 필요){% endif %}"
-        {% if not yt_auth %}disabled{% endif %}>
-        YouTube까지 원스톱
-      </button>
-      <button id="btn-onestop-band" onclick="doOnestop('band')"
-        style="background:var(--purple);color:#fff"
-        title="검출 → 생성 → YouTube → BAND 게시까지 자동 진행{% if not band_auth %} (BAND 인증 필요){% endif %}"
-        {% if not band_auth %}disabled{% endif %}>
-        BAND까지 원스톱
-      </button>
-    </div>
-    <div class="hint" style="margin-top:6px">
-      각 영상의 민감도를 개별 설정할 수 있습니다.
-      원스톱: 추가 즉시 검출 → AI 판별 → 영상 생성 → 업로드/게시까지 완전 자동.
+    <!-- ── 원스톱 설정 패널 ───────────────────────────── -->
+    <div style="margin-top:14px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+
+      <!-- 인증 상태 -->
+      <div style="background:#1a1a2e;padding:10px 14px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+        <span style="font-size:12px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap">인증 상태</span>
+        <span id="auth-yt-indicator" style="font-size:13px">
+          {% if yt_auth %}
+            <span style="color:var(--green)">✔ YouTube 인증됨</span>
+          {% else %}
+            <span style="color:var(--red)">✖ YouTube 미인증</span>
+            &nbsp;<a href="/auth/youtube" style="font-size:12px;color:var(--blue)">인증하기 →</a>
+          {% endif %}
+        </span>
+        <span id="auth-band-indicator" style="font-size:13px">
+          {% if band_auth %}
+            <span style="color:var(--green)">✔ BAND 인증됨</span>
+          {% elif band_has_creds %}
+            <span style="color:var(--hint)">○ BAND 미인증</span>
+            &nbsp;<a href="/auth/band" style="font-size:12px;color:var(--blue)">인증하기 →</a>
+          {% else %}
+            <span style="color:var(--hint)">○ BAND (설정 없음)</span>
+          {% endif %}
+        </span>
+      </div>
+
+      <!-- 검출 · 생성 설정 -->
+      <div style="padding:12px 14px;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end">
+
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--hint)">
+          민감도 (기본)
+          <select id="setting-sens" class="sens-sel" onchange="applyBulkSens(this.value)">
+            {% for k, v in sensitivities.items() %}
+            <option value="{{ k }}" {% if k == 'normal' %}selected{% endif %}>{{ v.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--hint)">
+          앞 구간 (초)
+          <input type="number" id="setting-pre" min="1" max="30" value="8"
+                 style="width:60px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--txt)">
+        </label>
+
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--hint)">
+          뒤 구간 (초)
+          <input type="number" id="setting-post" min="1" max="30" value="5"
+                 style="width:60px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--txt)">
+        </label>
+
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--hint)">
+          영상 품질
+          <select id="hl-quality" class="sens-sel">
+            {% for k, v in qualities.items() %}
+            <option value="{{ k }}" {% if k == 'balanced' %}selected{% endif %}>{{ v.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--hint)">
+          Gemini 병렬 수
+          <input type="number" id="workers" min="1" max="8" value="{{ workers }}"
+                 style="width:60px;padding:4px 6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--txt)">
+        </label>
+
+      </div>
+
+      <!-- 실행 버튼 -->
+      <div style="padding:10px 14px;background:#111122;display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border)">
+        <button id="btn-add" onclick="doAdd()">큐에 추가</button>
+        <button id="btn-onestop-yt" onclick="doOnestop('youtube')" class="accent-btn"
+          title="검출 → 생성 → YouTube 업로드까지 완전 자동">
+          ▶ YouTube까지 원스톱
+        </button>
+        <button id="btn-onestop-band" onclick="doOnestop('band')"
+          style="background:var(--purple);color:#fff;border:none;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600"
+          title="검출 → 생성 → YouTube → BAND 게시까지 완전 자동">
+          ▶ BAND까지 원스톱
+        </button>
+      </div>
     </div>
   </div>
 
@@ -453,6 +500,36 @@ function onAutoUploadToggle(on) {
   if (on) logLine("생성 완료 시 자동 YouTube 업로드 켜짐", "done");
 }
 
+// ─── 인증 상태 실시간 갱신 ──────────────────────────────
+async function refreshAuthIndicators() {
+  const ytEl   = document.getElementById("auth-yt-indicator");
+  const bandEl = document.getElementById("auth-band-indicator");
+  try {
+    const r = await fetch("/api/auth/youtube/status");
+    const d = await r.json();
+    ytAuth = !!d.ok;
+    if (ytEl) {
+      ytEl.innerHTML = d.ok
+        ? `<span style="color:var(--green)">✔ YouTube 인증됨${d.channel ? " (" + d.channel.title + ")" : ""}</span>`
+        : `<span style="color:var(--red)">✖ YouTube 미인증</span>&nbsp;<a href="/auth/youtube" style="font-size:12px;color:var(--blue)">인증하기 →</a>`;
+    }
+  } catch(e) {}
+  try {
+    const r = await fetch("/api/auth/band/status");
+    const d = await r.json();
+    bandAuth = !!d.ok;
+    if (bandEl) {
+      bandEl.innerHTML = d.ok
+        ? `<span style="color:var(--green)">✔ BAND 인증됨</span>`
+        : d.has_creds
+          ? `<span style="color:var(--hint)">○ BAND 미인증</span>&nbsp;<a href="/auth/band" style="font-size:12px;color:var(--blue)">인증하기 →</a>`
+          : `<span style="color:var(--hint)">○ BAND (설정 없음)</span>`;
+    }
+  } catch(e) {}
+}
+// 큐 탭 진입 시 인증 상태 확인
+refreshAuthIndicators();
+
 // ─── 알림 ───────────────────────────────────────────────
 (function initNotif() {
   if (!("Notification" in window)) return;
@@ -578,8 +655,6 @@ function applyBulkSens(val) {
   if (!val) return;
   staged.forEach(s => s.sensitivity = val);
   renderStaged();
-  const sel = document.getElementById("bulk-sens");
-  if (sel) sel.value = "";   // 다시 안내 상태로
   const lbl = (SENSITIVITIES[val] || {}).label || val;
   logLine(`전체 ${staged.length}개 민감도를 "${lbl}"로 설정`, "done");
 }
@@ -606,8 +681,10 @@ async function doAdd() {
     if (dupCount) logLine(`${dupCount}개 모두 이미 처리 중(중복). 건너뜁니다.`, "fail");
     return;
   }
-  const workers = parseInt(document.getElementById("workers").value) || 6;
-  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers}));
+  const workers  = parseInt(document.getElementById("workers").value) || 6;
+  const pre_sec  = parseFloat(document.getElementById("setting-pre")?.value) || 8;
+  const post_sec = parseFloat(document.getElementById("setting-post")?.value) || 5;
+  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers, pre_sec, post_sec}));
   logLine(`영상 ${jobs.length}개 큐에 추가 중…`, "start");
   const btn = document.getElementById("btn-add");
   btn.disabled = true;
@@ -639,23 +716,29 @@ async function doOnestop(mode) {
   if (!staged.length) syncStaged();
   const toAdd = staged.filter(s => !s.dup);
   if (!toAdd.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
-  if (mode === "youtube" && !ytAuth) { alert("YouTube 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
-  if (mode === "band"    && !bandAuth) { alert("BAND 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
-  // 인증 토큰이 실제로 유효한지 서버에서 검증 (만료 여부 포함)
-  if (mode === "youtube" || mode === "band") {
-    const endpoint = mode === "youtube" ? "/api/youtube/status" : "/api/band/status";
-    try {
-      const st = await (await fetch(endpoint)).json();
-      if (!st.ok) {
-        alert(`인증이 만료되었거나 유효하지 않습니다.\n영상 생성 탭에서 다시 인증해 주세요.`);
+  // 인증 토큰 실시간 검증 (YouTube는 항상, BAND 모드면 BAND도 추가 확인)
+  try {
+    const ytSt = await (await fetch("/api/auth/youtube/status")).json();
+    if (!ytSt.ok) {
+      refreshAuthIndicators();
+      alert("YouTube 인증이 만료되었습니다.\n설정 패널의 \"인증하기 →\" 링크를 클릭하세요.");
+      return;
+    }
+    if (mode === "band") {
+      const bSt = await (await fetch("/api/auth/band/status")).json();
+      if (!bSt.ok) {
+        refreshAuthIndicators();
+        alert("BAND 인증이 만료되었습니다.\n설정 패널의 \"인증하기 →\" 링크를 클릭하세요.");
         return;
       }
-    } catch(e) { alert("인증 상태 확인 실패. 네트워크를 확인하세요."); return; }
-  }
+    }
+  } catch(e) { alert("인증 상태 확인 실패. 네트워크를 확인하세요."); return; }
   if (_pipe) { if (!confirm("진행 중인 파이프라인을 취소하고 새로 시작할까요?")) return; cancelPipeline(true); }
 
-  const workers = parseInt(document.getElementById("workers").value) || 6;
-  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers}));
+  const workers  = parseInt(document.getElementById("workers").value) || 6;
+  const pre_sec  = parseFloat(document.getElementById("setting-pre")?.value) || 8;
+  const post_sec = parseFloat(document.getElementById("setting-post")?.value) || 5;
+  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers, pre_sec, post_sec}));
   _pipeBtns(true);
   try {
     const d = await post("/api/jobs/add", {jobs, workers});

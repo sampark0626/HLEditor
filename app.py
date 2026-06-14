@@ -51,7 +51,8 @@ _JLOCK = threading.Lock()
 _BUILD_LOCK = threading.Lock()
 
 
-def _new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS):
+def _new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
+             pre_sec=None, post_sec=None):
     jid = uuid.uuid4().hex[:8]
     job = dict(
         id=jid,
@@ -59,6 +60,8 @@ def _new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS):
         video_name=os.path.basename(video),
         sensitivity=sensitivity,
         workers=workers,
+        pre_sec=float(pre_sec) if pre_sec is not None else sh.PRE_SEC,
+        post_sec=float(post_sec) if post_sec is not None else sh.POST_SEC,
         status="pending",
         candidates=[],
         vision_used=False,
@@ -172,7 +175,8 @@ def _process(jid):
     log.info("[%s] 검출 시작: %s (민감도: %s)", jid, video, job["sensitivity"])
 
     dur = sh.probe_duration(video)
-    cands = sh.detect_spikes(video, wd, percentile=sp["percentile"], min_db=sp["min_db"])
+    cands = sh.detect_spikes(video, wd, percentile=sp["percentile"], min_db=sp["min_db"],
+                             pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"))
     _upd(jid, duration=dur, candidates=cands)
     log.info("[%s] 검출 완료: %.1fs, 후보 %d개", jid, dur, len(cands))
 
@@ -190,6 +194,7 @@ def _process(jid):
     usage = sh.classify_all_parallel(
         cands, video, wd, client, sh.CONF_AUTO, job["workers"],
         on_progress=lambda d, t: _set_prog(jid, "classify", d, t),
+        pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"),
     )
     cost = (usage["in"] / 1e6 * sh.PRICE_IN_PER_M +
             usage["out"] / 1e6 * sh.PRICE_OUT_PER_M)
@@ -249,6 +254,8 @@ def _job_summary(job):
         band_post_url=job.get("band_post_url"),
         band_error=job.get("band_error"),
         match_date=job.get("match_date"),
+        pre_sec=job.get("pre_sec", sh.PRE_SEC),
+        post_sec=job.get("post_sec", sh.POST_SEC),
     )
 
 
@@ -350,9 +357,11 @@ def api_jobs_add():
         if abs_v in active_paths:
             skipped.append(os.path.basename(v))
             continue
-        sens = item.get("sensitivity", "normal")
-        w = max(1, min(int(item.get("workers", global_workers)), 8))
-        jid = _new_job(abs_v, sens, w)
+        sens     = item.get("sensitivity", "normal")
+        w        = max(1, min(int(item.get("workers", global_workers)), 8))
+        pre_sec  = item.get("pre_sec")
+        post_sec = item.get("post_sec")
+        jid = _new_job(abs_v, sens, w, pre_sec=pre_sec, post_sec=post_sec)
         JOB_QUEUE.put(jid)
         added.append(jid)
         active_paths.add(abs_v)
@@ -461,6 +470,7 @@ def api_jobs_build_all():
                         preset=qk.get("preset"), crf=qk.get("crf"),
                         copy_mode=qk.get("copy", False),
                         on_progress=lambda d, t, _j=jid: _set_prog(_j, "build", d, t),
+                        pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"),
                     )
                     _upd(jid, status="done", output=out_path)
                     _clr_prog(jid)
