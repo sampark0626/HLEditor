@@ -641,6 +641,17 @@ async function doOnestop(mode) {
   if (!toAdd.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
   if (mode === "youtube" && !ytAuth) { alert("YouTube 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
   if (mode === "band"    && !bandAuth) { alert("BAND 인증이 필요합니다.\n영상 생성 탭에서 인증하세요."); return; }
+  // 인증 토큰이 실제로 유효한지 서버에서 검증 (만료 여부 포함)
+  if (mode === "youtube" || mode === "band") {
+    const endpoint = mode === "youtube" ? "/api/youtube/status" : "/api/band/status";
+    try {
+      const st = await (await fetch(endpoint)).json();
+      if (!st.ok) {
+        alert(`인증이 만료되었거나 유효하지 않습니다.\n영상 생성 탭에서 다시 인증해 주세요.`);
+        return;
+      }
+    } catch(e) { alert("인증 상태 확인 실패. 네트워크를 확인하세요."); return; }
+  }
   if (_pipe) { if (!confirm("진행 중인 파이프라인을 취소하고 새로 시작할까요?")) return; cancelPipeline(true); }
 
   const workers = parseInt(document.getElementById("workers").value) || 6;
@@ -1534,10 +1545,16 @@ function ytTitleFor(jid, baseTitle) {
   const vname = j ? j.video_name.replace(/\.[^.]+$/, "") : "";
   const date  = (j && j.match_date) || localDateStr();
   const base  = (baseTitle || "").trim();
-  // 베이스 제목에 이미 영상명이 들어있으면 중복 방지
+  // 해시처럼 생긴 파일명(32자 이상 16진수)은 제목에서 제외하고 날짜별 번호로 대체
+  const isHash = /^[0-9a-f]{24,}$/i.test(vname);
   const parts = [base];
-  if (vname && !base.includes(vname)) parts.push(vname);
+  if (!isHash && vname && !base.includes(vname)) parts.push(vname);
   parts.push(date);
+  // 같은 날짜 잡이 여러 개면 번호 추가
+  if (j) {
+    const sameDateJobs = allJobs.filter(x => (x.match_date || "") === (j.match_date || "")).sort((a, b) => a.id < b.id ? -1 : 1);
+    if (sameDateJobs.length > 1) parts.push(String(sameDateJobs.findIndex(x => x.id === j.id) + 1));
+  }
   return parts.filter(Boolean).join(" | ").slice(0, 100);
 }
 
