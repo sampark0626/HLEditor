@@ -842,7 +842,7 @@ async function advancePipeline(jobs) {
         titles[j.id]  = ytTitleFor(j.id, buildData[j.id]?.title || "한울타리 FC 경기영상");
         outputs[j.id] = buildData[j.id]?.output || "";
       });
-      await post("/api/jobs/build-all", {quality, titles, outputs});
+      await post("/api/jobs/build-all", {quality, titles, outputs, auto_upload: true});
     } catch(e) { logLine("[원스톱] 생성 요청 오류: " + e.message, "fail"); _pipeDone(); }
 
   // ── step: building ───────────────────────────────────

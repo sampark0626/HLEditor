@@ -424,10 +424,12 @@ def api_jobs_approve_all():
 @app.route("/api/jobs/build-all", methods=["POST"])
 def api_jobs_build_all():
     body = request.json or {}
-    quality = body.get("quality", "balanced")
-    titles  = body.get("titles", {})
-    outputs = body.get("outputs", {})
+    quality     = body.get("quality", "balanced")
+    titles      = body.get("titles", {})
+    outputs     = body.get("outputs", {})
+    auto_upload = bool(body.get("auto_upload", False))  # 빌드 직후 자동 업로드
     qk = sh.QUALITY_PRESETS.get(quality, sh.QUALITY_PRESETS["balanced"])
+    privacy = _get_yt_privacy()
 
     to_build = [
         jid for jid, job in JOBS.items()
@@ -435,7 +437,6 @@ def api_jobs_build_all():
         and job["approved"] is not None
         and len(job["approved"]) > 0
     ]
-    # 저장은 됐지만 승인 구간이 0개인 잡 (하이라이트 없음 → 빌드 제외)
     skipped = [
         job["video_name"] for job in JOBS.values()
         if job["status"] in ("ready", "done")
@@ -475,6 +476,17 @@ def api_jobs_build_all():
                     _upd(jid, status="done", output=out_path)
                     _clr_prog(jid)
                     log.info("[%s] 빌드 완료: %s", jid, out_path)
+
+                    # 빌드 완료 즉시 업로드 시작 — 다음 잡 빌드와 병렬 처리
+                    if auto_upload and _HAS_YT and yt_up.is_authenticated():
+                        yt_title = title or "한울타리 FC 경기영상"
+                        threading.Thread(
+                            target=_upload_job_to_youtube,
+                            args=(jid, yt_title, privacy),
+                            daemon=True,
+                        ).start()
+                        log.info("[%s] 빌드 완료 → 업로드 즉시 시작", jid)
+
                 except Exception as e:
                     _upd(jid, status="error", error=str(e)[:300])
                     _clr_prog(jid)
