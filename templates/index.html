@@ -789,8 +789,8 @@ function renderPipeBar() {
 
   const STEPS = _pipe.mode === "band"
     ? ["processing","building","uploading","posting","done"]
-    : ["processing","building","uploading","done"];
-  const LABELS = { processing:"처리 중", building:"영상 생성", uploading:"YouTube 업로드", posting:"BAND 게시", done:"완료" };
+    : ["processing","building","uploading","band_copy","done"];
+  const LABELS = { processing:"처리 중", building:"영상 생성", uploading:"YouTube 업로드", posting:"BAND 게시", band_copy:"BAND 글 준비", done:"완료" };
 
   const stepIdx = STEPS.indexOf(_pipe.step);
   const stepsEl = document.getElementById("pipe-steps");
@@ -895,13 +895,33 @@ async function advancePipeline(jobs) {
       _pipeSetStep("done");
       document.getElementById("pipe-detail").textContent = "모든 단계 완료!";
       _pipeDone();
+      // BAND API 게시 후에도 텍스트 클립보드 복사 (백업)
+      updateBandPreview();
+      copyBandText(true).catch(() => {});
     } else {
-      _pipeSetStep("done");
-      document.getElementById("pipe-detail").textContent = `${uploaded.length}개 영상 YouTube 업로드 완료!`;
-      logLine(`[원스톱] YouTube까지 완료! (${uploaded.length}개)`, "done");
-      sendNotif("원스톱 완료", `${uploaded.length}개 영상이 YouTube에 업로드되었습니다.`);
-      _pipeDone();
+      // youtube 모드: 업로드 완료 후 BAND 글 자동 준비 단계로
+      _pipeSetStep("band_copy");
+      logLine(`[원스톱] YouTube 업로드 완료 (${uploaded.length}개) → BAND 게시 글 준비 중`, "start");
     }
+
+  // ── step: band_copy ─────────────────────────────────
+  } else if (step === "band_copy") {
+    if (elapsed < PIPE_STEP_DELAY) return;
+    document.getElementById("pipe-detail").textContent = "BAND 게시 텍스트 클립보드 복사 중…";
+    updateBandPreview();
+    try {
+      await copyBandText(true);
+      logLine(`[원스톱] 완료! BAND 게시 텍스트가 클립보드에 복사됐습니다.`, "done");
+      sendNotif("원스톱 완료", "YouTube 업로드 완료 · BAND 게시 텍스트가 클립보드에 복사됐습니다.");
+    } catch(e) {
+      logLine(`[원스톱] 완료! (BAND 텍스트 자동복사 실패 — 영상 생성 탭에서 수동 복사하세요)`, "done");
+      sendNotif("원스톱 완료", "YouTube 업로드 완료 · BAND 탭에서 게시 텍스트를 복사하세요.");
+    }
+    // 영상 생성 탭으로 이동해 BAND 게시 카드 표시
+    go("build");
+    _pipeSetStep("done");
+    document.getElementById("pipe-detail").textContent = "YouTube 업로드 + BAND 글 준비 완료!";
+    _pipeDone();
   }
 }
 
@@ -1762,11 +1782,11 @@ function updateBandPreview() {
   prev.textContent = text.trim();
 }
 
-async function copyBandText() {
+async function copyBandText(silent = false) {
   const prev = document.getElementById("band-post-preview");
   const text = prev?.textContent?.trim();
   if (!text || text === "게시할 새 링크 없음") {
-    alert("복사할 링크가 없습니다. YouTube 업로드를 먼저 완료하세요."); return;
+    if (!silent) alert("복사할 링크가 없습니다. YouTube 업로드를 먼저 완료하세요."); return;
   }
   const resultEl = document.getElementById("band-copy-result");
   try {
