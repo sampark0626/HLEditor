@@ -11,6 +11,10 @@ __pycache__/
 .venv/
 venv/
 
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+
 # Build outputs
 dist/
 build/
@@ -29,6 +33,7 @@ Thumbs.db
 
 # Logs
 *.log
+*.log.*
 logs/
 
 # OAuth tokens (sensitive — never commit)
@@ -37,7 +42,9 @@ band_token.json
 client_secrets.json
 client_secret.json
 
-# Generated media / results
+# Generated media / results — output/, results/ 하위로 정리됨 (2026-07)
+output/
+results/
 highlights*.mp4
 test_clip.mp4
 *_test.mp4

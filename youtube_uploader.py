@@ -7,11 +7,10 @@ youtube_uploader.py — 축구 하이라이트 YouTube 업로드 모듈
 """
 
 import json
-import os
 import subprocess
-import time
 from pathlib import Path
-from typing import Optional
+
+import config
 
 # ─── 경로 및 상수 ─────────────────────────────────────────────────────────────
 _BASE = Path(__file__).parent
@@ -25,25 +24,8 @@ SCOPES = [
 
 
 # ─── 내부 헬퍼 ────────────────────────────────────────────────────────────────
-def _load_env() -> dict:
-    env_path = _BASE / ".env"
-    if not env_path.exists():
-        return {}
-    result = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            result[k.strip()] = v.strip().strip('"').strip("'")
-    return result
-
-
-def _get_env(key: str, default: str = "") -> str:
-    return os.environ.get(key) or _load_env().get(key, default)
-
-
-def _get_secrets_path() -> Optional[str]:
-    env_path = _get_env("YOUTUBE_CLIENT_SECRETS")
+def _get_secrets_path() -> str | None:
+    env_path = config.get_env("YOUTUBE_CLIENT_SECRETS")
     if env_path and Path(env_path).exists():
         return env_path
     if _DEFAULT_SECRETS.exists():
@@ -77,8 +59,8 @@ def _save_token(creds) -> None:
 
 
 def _get_credentials():
-    from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
+    from google.oauth2.credentials import Credentials  # type: ignore
     if not TOKEN_FILE.exists():
         return None
     data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
@@ -132,7 +114,7 @@ def is_authenticated() -> bool:
         return False
 
 
-def get_channel_info() -> Optional[dict]:
+def get_channel_info() -> dict | None:
     """인증된 YouTube 채널 정보 반환 (id, title)."""
     try:
         from googleapiclient.discovery import build  # type: ignore
@@ -242,7 +224,7 @@ def upload_video(
     video_path: str,
     title: str,
     description: str,
-    thumbnail_path: Optional[str] = None,
+    thumbnail_path: str | None = None,
     privacy: str = "public",
     on_progress=None,          # callable(bytes_done, total_bytes) or None
 ) -> str:
@@ -250,8 +232,8 @@ def upload_video(
     YouTube에 영상 업로드.
     완료 시 YouTube URL(https://youtu.be/<id>) 반환.
     """
-    from googleapiclient.discovery import build            # type: ignore
-    from googleapiclient.http import MediaFileUpload       # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaFileUpload  # type: ignore
 
     creds = _get_credentials()
     if not creds:

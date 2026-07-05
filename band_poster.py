@@ -7,15 +7,15 @@ band_poster.py — BAND 게시글 작성 모듈
 """
 
 import json
-import os
 import time
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlencode
 
 import requests  # type: ignore
+
+import config
 
 # ─── 경로 및 상수 ─────────────────────────────────────────────────────────────
 _BASE      = Path(__file__).parent
@@ -26,33 +26,15 @@ BAND_TOKEN_URL = "https://auth.band.us/oauth2/token"
 BAND_API_BASE  = "https://openapi.band.us"
 
 
-# ─── 내부 헬퍼 ────────────────────────────────────────────────────────────────
-def _load_env() -> dict:
-    env_path = _BASE / ".env"
-    if not env_path.exists():
-        return {}
-    result = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            result[k.strip()] = v.strip().strip('"').strip("'")
-    return result
-
-
-def _get_env(key: str, default: str = "") -> str:
-    return os.environ.get(key) or _load_env().get(key, default)
-
-
 # ─── 공개 API ─────────────────────────────────────────────────────────────────
 def has_credentials() -> bool:
     """BAND_CLIENT_ID / BAND_CLIENT_SECRET가 .env에 있는지 확인."""
-    return bool(_get_env("BAND_CLIENT_ID")) and bool(_get_env("BAND_CLIENT_SECRET"))
+    return config.has_band_credentials()
 
 
 def get_auth_url(redirect_uri: str) -> str:
     """BAND OAuth 인증 URL 반환."""
-    client_id = _get_env("BAND_CLIENT_ID")
+    client_id = config.get_env("BAND_CLIENT_ID")
     if not client_id:
         raise ValueError("BAND_CLIENT_ID가 .env에 없습니다.")
     params = {
@@ -65,8 +47,8 @@ def get_auth_url(redirect_uri: str) -> str:
 
 def exchange_code(code: str, redirect_uri: str) -> None:
     """인증 코드 → 토큰 교환 후 band_token.json 저장."""
-    client_id     = _get_env("BAND_CLIENT_ID")
-    client_secret = _get_env("BAND_CLIENT_SECRET")
+    client_id     = config.get_env("BAND_CLIENT_ID")
+    client_secret = config.get_env("BAND_CLIENT_SECRET")
     if not client_id or not client_secret:
         raise ValueError("BAND_CLIENT_ID / BAND_CLIENT_SECRET가 .env에 없습니다.")
     resp = requests.post(
@@ -173,7 +155,7 @@ def write_post(band_key: str, content: str) -> str:
 # ─── 콘텐츠 포맷 ──────────────────────────────────────────────────────────────
 def format_post_content(
     video_links: list,
-    match_date: Optional[str] = None,
+    match_date: str | None = None,
 ) -> str:
     """
     YouTube 링크 목록 → BAND 게시글 텍스트 포맷.

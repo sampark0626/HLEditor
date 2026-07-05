@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["static", "templates", "__pycache__", "output", "results"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle 오류
+    "F",   # pyflakes (미사용 import/변수 등)
+    "W",   # pycodestyle 경고
+    "I",   # import 정렬
+    "UP",  # pyupgrade (더 최신 문법 제안)
+]
+ignore = [
+    "E501",  # 긴 줄 — 한글 로그 메시지·f-string이 많아 100자 기준도 자주 넘음
+    "E701",  # try:/except: 한 줄 압축 스타일 — 임시 파일 정리 등에서 코드베이스 전반에 의도적으로 사용
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]  # 테스트에서 fixture/모킹용 import가 직접 쓰이지 않는 것처럼 보일 수 있음
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

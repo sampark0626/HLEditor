@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+jobs.py — 배치 잡 상태 저장소·백그라운드 워커·오디오/비전 처리 파이프라인.
+
+JOBS 딕셔너리가 이 앱의 유일한 상태 저장소다. 서버가 재시작되면 원칙적으로
+초기화되지만, 판별까지 끝난(ready) 잡은 results/results_{jid}.json으로 이미
+저장돼 있으므로 restore_recent_results()가 이를 스캔해 최근 것만 복원한다.
+모든 접근은 JLOCK으로 보호한다.
+"""
+
+import json
+import logging
+import os
+import queue
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from datetime import date
+from pathlib import Path
+
+import config
+import soccer_highlights as sh
+
+log = logging.getLogger("hl")
+
+JOBS = {}
+JOB_QUEUE = queue.Queue()
+JLOCK = threading.Lock()
+BUILD_LOCK = threading.Lock()
+
+ACTIVE_STATUSES = ("detecting", "classifying", "building")
+
+
+def new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
+            pre_sec=None, post_sec=None):
+    jid = uuid.uuid4().hex[:8]
+    job = dict(
+        id=jid,
+        video=os.path.abspath(video),
+        video_name=os.path.basename(video),
+        sensitivity=sensitivity,
+        workers=workers,
+        pre_sec=float(pre_sec) if pre_sec is not None else sh.PRE_SEC,
+        post_sec=float(post_sec) if post_sec is not None else sh.POST_SEC,
+        status="pending",
+        candidates=[],
+        vision_used=False,
+        usage=None,
+        workdir=None,
+        output=None,
+        error=None,
+        duration=None,
+        approved=None,
+        progress=dict(stage=None, done=0, total=0),
+        started_at=None,   # monotonic timestamp — 처리 시작
+        finished_at=None,  # monotonic timestamp — ready 도달
+        # YouTube 업로드 상태
+        yt_status=None,    # None | "uploading" | "done" | "error"
+        yt_url=None,       # https://youtu.be/<id>
+        yt_error=None,
+        yt_progress=dict(done=0, total=0),
+        # BAND 게시 상태
+        band_status=None,  # None | "posting" | "done" | "error"
+        band_post_url=None,
+        band_error=None,
+        match_date=date.today().isoformat(),  # BAND 날짜별 그룹핑용
+        # 취소/지연삭제 상태
+        cancel_requested=False,   # True면 처리 루프가 다음 체크포인트에서 중단
+        pending_delete=False,     # 처리 중 삭제 요청됨 — 완료 시 실제 제거
+    )
+    with JLOCK:
+        JOBS[jid] = job
+    return jid
+
+
+def update(jid, **kw):
+    """jid가 이미 삭제됐으면 조용히 무시한다(처리 중 삭제로 인한 경쟁 방지)."""
+    with JLOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            return
+        job.update(kw)
+
+
+def set_progress(jid, stage, done, total):
+    with JLOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            return
+        job["progress"] = dict(stage=stage, done=done, total=total)
+
+
+def clear_progress(jid):
+    with JLOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            return
+        job["progress"] = dict(stage=None, done=0, total=0)
+
+
+def is_cancelled(jid) -> bool:
+    with JLOCK:
+        job = JOBS.get(jid)
+        return bool(job and job.get("cancel_requested"))
+
+
+def finalize_pending_delete(jid) -> bool:
+    """취소 요청으로 삭제가 지연됐던 잡을 처리 종료 후 실제로 정리한다."""
+    with JLOCK:
+        job = JOBS.get(jid)
+        if job is None or not job.get("pending_delete"):
+            return False
+        JOBS.pop(jid, None)
+    if job.get("workdir") and os.path.exists(job["workdir"]):
+        shutil.rmtree(job["workdir"], ignore_errors=True)
+    delete_results_file(jid)
+    log.info("[%s] 지연 삭제 완료 (취소된 작업 정리)", jid)
+    return True
+
+
+def delete_results_file(jid) -> None:
+    """results/results_{jid}.json을 제거한다 (잡이 완전히 삭제될 때 함께 정리해
+    재시작 시 이미 삭제된 잡이 restore_recent_results()로 되살아나지 않게 한다)."""
+    try:
+        (config.RESULTS_DIR / f"results_{jid}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def restore_recent_results(max_age_hours: float = 24.0) -> int:
+    """서버 재시작 시 results/ 의 최근 판별 결과를 'ready' 잡으로 복원한다.
+
+    오래된 결과(기본 24시간 초과)는 복원하지 않는다 — 그렇지 않으면 몇 주 전에
+    이미 처리·삭제한 잡들까지 재시작할 때마다 매번 리뷰 큐에 다시 나타나게 된다.
+    원본 영상 파일이 더 이상 존재하지 않는 항목도 건너뛴다.
+    """
+    restored = 0
+    now = time.time()
+    for path in sorted(config.RESULTS_DIR.glob("results_*.json")):
+        jid = path.stem[len("results_"):]
+        with JLOCK:
+            already_loaded = jid in JOBS
+        if already_loaded:
+            continue
+        age_hours = (now - path.stat().st_mtime) / 3600
+        if age_hours > max_age_hours:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        video = data.get("video")
+        if not video or not os.path.exists(video):
+            continue
+
+        params = data.get("params") or {}
+        job = dict(
+            id=jid,
+            video=video,
+            video_name=os.path.basename(video),
+            sensitivity="normal",
+            workers=sh.VISION_WORKERS,
+            pre_sec=params.get("PRE_SEC", sh.PRE_SEC),
+            post_sec=params.get("POST_SEC", sh.POST_SEC),
+            status="ready",
+            candidates=data.get("candidates", []),
+            vision_used=bool(data.get("vision_used", True)),
+            usage=None,
+            workdir=str(Path(tempfile.mkdtemp(prefix=f"hl_{jid}_"))),
+            output=None,
+            error=None,
+            duration=data.get("duration"),
+            approved=None,
+            progress=dict(stage=None, done=0, total=0),
+            started_at=None,
+            finished_at=None,
+            yt_status=None,
+            yt_url=None,
+            yt_error=None,
+            yt_progress=dict(done=0, total=0),
+            band_status=None,
+            band_post_url=None,
+            band_error=None,
+            match_date=date.today().isoformat(),
+            cancel_requested=False,
+            pending_delete=False,
+        )
+        with JLOCK:
+            if jid not in JOBS:
+                JOBS[jid] = job
+                restored += 1
+    if restored:
+        log.info("이전 세션의 판별 결과 %d개를 복원 (24시간 이내)", restored)
+    return restored
+
+
+def _friendly_error(exc: Exception) -> str:
+    """예외를 사람이 읽기 쉬운 한 줄 메시지로 변환."""
+    msg = str(exc)
+    etype = type(exc).__name__
+
+    # ffmpeg / ffprobe 없음
+    if isinstance(exc, FileNotFoundError):
+        if "ffmpeg" in msg.lower() or "ffprobe" in msg.lower() or "WinError 2" in msg:
+            return (
+                "ffmpeg를 찾을 수 없습니다. "
+                "설치 후 앱을 재시작하세요.\n"
+                "  winget install Gyan.FFmpeg  (관리자 PowerShell)\n"
+                "또는 https://ffmpeg.org/download.html 에서 수동 설치"
+            )
+        return f"파일을 찾을 수 없습니다: {msg}"
+
+    # ffmpeg 실행 오류
+    if isinstance(exc, RuntimeError) and "command failed" in msg:
+        return f"ffmpeg 실행 오류: {msg}"
+
+    # 영상 파일 없음·접근 불가
+    if isinstance(exc, (FileNotFoundError, PermissionError, OSError)):
+        return f"[{etype}] {msg}"
+
+    # 그 외: 마지막 줄만 표시 (트레이스백 제외)
+    last_line = msg.strip().splitlines()[-1] if msg.strip() else repr(exc)
+    return f"[{etype}] {last_line}"
+
+
+def _process(jid):
+    job = JOBS.get(jid)
+    if job is None:
+        return
+    video = job["video"]
+    sp = sh.SENSITIVITY_PRESETS.get(job["sensitivity"], sh.SENSITIVITY_PRESETS["normal"])
+
+    wd = Path(tempfile.mkdtemp(prefix=f"hl_{jid}_"))
+    t_start = time.monotonic()
+    update(jid, workdir=str(wd), status="detecting", started_at=t_start)
+    log.info("[%s] 검출 시작: %s (민감도: %s)", jid, video, job["sensitivity"])
+
+    dur = sh.probe_duration(video)
+    cands = sh.detect_spikes(video, wd, percentile=sp["percentile"], min_db=sp["min_db"],
+                             pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"))
+    update(jid, duration=dur, candidates=cands)
+    log.info("[%s] 검출 완료: %.1fs, 후보 %d개", jid, dur, len(cands))
+
+    if is_cancelled(jid):
+        update(jid, status="error", error="사용자 취소")
+        log.info("[%s] 검출 직후 취소됨", jid)
+        return
+
+    key = config.load_gemini_api_key()
+    if not key:
+        update(jid, status="ready", vision_used=False, finished_at=time.monotonic())
+        log.warning("[%s] API 키 없음 — 비전 생략", jid)
+        return
+
+    from google import genai
+    client = genai.Client(api_key=key)
+    update(jid, status="classifying")
+    set_progress(jid, "classify", 0, len(cands))
+
+    usage = sh.classify_all_parallel(
+        cands, video, wd, client, sh.CONF_AUTO, job["workers"],
+        should_cancel=lambda: is_cancelled(jid),
+        on_progress=lambda d, t: set_progress(jid, "classify", d, t),
+        pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"),
+    )
+    if usage.get("cancelled") or is_cancelled(jid):
+        update(jid, status="error", error="사용자 취소")
+        clear_progress(jid)
+        log.info("[%s] 판별 중 취소됨", jid)
+        return
+    cost = (usage["in"] / 1e6 * sh.PRICE_IN_PER_M +
+            usage["out"] / 1e6 * sh.PRICE_OUT_PER_M)
+    usage["cost_usd"] = round(cost, 4)
+
+    sh.save_results(
+        str(config.RESULTS_DIR / f"results_{jid}.json"),
+        video, dur, cands, True,
+    )
+    update(jid, status="ready", vision_used=True, usage=usage,
+           candidates=cands, finished_at=time.monotonic())
+    clear_progress(jid)
+    log.info("[%s] 판별 완료: $%.4f", jid, cost)
+
+
+def _worker():
+    while True:
+        jid = JOB_QUEUE.get()
+        if jid is None:
+            break
+        try:
+            with JLOCK:
+                exists = jid in JOBS
+            if exists:
+                _process(jid)
+        except Exception as exc:
+            update(jid, status="error", error=_friendly_error(exc))
+            log.exception("[%s] 처리 실패", jid)
+        finally:
+            finalize_pending_delete(jid)
+            JOB_QUEUE.task_done()
+
+
+def start_worker() -> threading.Thread:
+    """백그라운드 워커 스레드를 시작한다 (앱 시작 시 1회 호출)."""
+    t = threading.Thread(target=_worker, daemon=True, name="hl-worker")
+    t.start()
+    return t
+
+
+# ─── 직렬화 ───────────────────────────────────────────────
+def flag(c, conf_auto, vision_used):
+    if not vision_used:
+        return "auto"
+    conf = float(c.get("confidence", 0))
+    if c.get("highlight") and conf >= conf_auto:
+        return "auto"
+    if c.get("highlight") and conf >= sh.CONF_MAYBE:
+        return "maybe"
+    return "reject"
+
+
+def job_summary(job):
+    cands = job["candidates"]
+    vu = job["vision_used"]
+    n_auto  = sum(1 for c in cands if flag(c, sh.CONF_AUTO, vu) == "auto")
+    n_maybe = sum(1 for c in cands if flag(c, sh.CONF_AUTO, vu) == "maybe")
+    elapsed = None
+    if job["started_at"] and job["finished_at"]:
+        elapsed = round(job["finished_at"] - job["started_at"])
+    return dict(
+        id=job["id"],
+        video_name=job["video_name"],
+        status=job["status"],
+        duration=job["duration"],
+        sensitivity=job["sensitivity"],
+        n_candidates=len(cands),
+        n_auto=n_auto,
+        n_maybe=n_maybe,
+        n_approved=(len(job["approved"]) if job["approved"] is not None else None),
+        usage=job["usage"],
+        error=job["error"],
+        progress=job["progress"],
+        output=job["output"],
+        vision_used=vu,
+        elapsed_sec=elapsed,
+        yt_status=job.get("yt_status"),
+        yt_url=job.get("yt_url"),
+        yt_error=job.get("yt_error"),
+        yt_progress=job.get("yt_progress", {"done": 0, "total": 0}),
+        band_status=job.get("band_status"),
+        band_post_url=job.get("band_post_url"),
+        band_error=job.get("band_error"),
+        match_date=job.get("match_date"),
+        pre_sec=job.get("pre_sec", sh.PRE_SEC),
+        post_sec=job.get("post_sec", sh.POST_SEC),
+    )
+
+
+def serialize_candidates(cands, conf_auto, vision_used):
+    out = []
+    for i, c in enumerate(cands):
+        conf = float(c.get("confidence", 0))
+        out.append(dict(
+            idx=i,
+            peak=round(float(c["peak"]), 1),
+            delta_db=round(float(c.get("delta_db", 0)), 1),
+            type=c.get("type", "-"),
+            confidence=round(conf, 2),
+            reason=c.get("reason", ""),
+            highlight=bool(c.get("highlight", False)),
+            flag=flag(c, conf_auto, vision_used),
+        ))
+    return out

@@ -24,16 +24,25 @@ import argparse
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from scipy.io import wavfile
+
+# Windows cp949 콘솔에서 진행 로그의 이모지(✅⚠️❌)를 print할 때
+# UnicodeEncodeError가 발생해 처리 스레드가 죽는 것을 방지 — stdout/stderr를
+# UTF-8로 재설정한다(모듈 임포트 시 1회, CLI 직접 실행/앱 임포트 양쪽에 적용).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------------
@@ -66,6 +75,7 @@ SPAWN_RETRIES  = 4      # ffmpeg 프로세스 생성 실패(WinError 5 등) 시 
 ENCODE_PRESET  = "fast"    # 압축 속도. veryfast(빠름,큼) ~ slow(느림,작음)
 ENCODE_CRF     = 25        # 화질/용량. 낮을수록 고화질·고용량 (18~28 권장)
 MAX_HEIGHT     = 1080      # 이 높이를 넘으면 다운스케일 (None이면 원본 유지)
+BUILD_CLIP_WORKERS = 3     # 클립별 재인코딩 동시 처리 수 (ffmpeg는 별도 프로세스라 GIL 영향 없음)
 
 # 출력 품질 프리셋 (UI/CLI 선택용). copy=stream-copy(재인코딩 없음, 타이틀 불가)
 QUALITY_PRESETS = {
@@ -139,15 +149,26 @@ def detect_spikes(video, workdir, percentile=None, min_db=None,
         덮어쓴다. 값이 클수록 후보가 줄어든다(엄선).
     pre_sec/post_sec: 구간 앞뒤 길이(초). 탈중복 계산에 사용.
     """
-    percentile = SPIKE_PERCENTILE if percentile is None else percentile
-    min_db = SPIKE_MIN_DB if min_db is None else min_db
-    pre_sec  = PRE_SEC  if pre_sec  is None else pre_sec
-    post_sec = POST_SEC if post_sec is None else post_sec
     wav = workdir / "audio.wav"
     run(["ffmpeg", "-y", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
          "-f", "wav", str(wav), "-loglevel", "error"])
 
     sr, data = wavfile.read(str(wav))
+    return detect_spikes_from_signal(sr, data, percentile=percentile, min_db=min_db,
+                                     pre_sec=pre_sec, post_sec=post_sec)
+
+
+def detect_spikes_from_signal(sr, data, percentile=None, min_db=None,
+                              pre_sec=None, post_sec=None):
+    """순수 신호 처리부: (샘플레이트, PCM 배열)에서 볼륨 급증 후보 구간을 계산한다.
+
+    ffmpeg/파일 I/O가 없어 합성 신호로 유닛 테스트하기 쉽다.
+    """
+    percentile = SPIKE_PERCENTILE if percentile is None else percentile
+    min_db = SPIKE_MIN_DB if min_db is None else min_db
+    pre_sec  = PRE_SEC  if pre_sec  is None else pre_sec
+    post_sec = POST_SEC if post_sec is None else post_sec
+
     if data.ndim > 1:
         data = data.mean(axis=1)
     data = data.astype(np.float64)
@@ -420,7 +441,7 @@ def _drawtext_filter(title, font_name):
 
 def build_output(video, segments, out_path, workdir, title=None,
                  preset=None, crf=None, copy_mode=False, max_height=None,
-                 on_progress=None, pre_sec=None, post_sec=None):
+                 on_progress=None, should_cancel=None, pre_sec=None, post_sec=None):
     """선택된 구간들을 잘라 이어붙여 최종 영상 생성.
 
     title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
@@ -429,6 +450,9 @@ def build_output(video, segments, out_path, workdir, title=None,
         경계로 시작점이 약간 어긋날 수 있고 **타이틀/다운스케일이 적용 안 됨**.
     max_height: 다운스케일 상한 (기본 MAX_HEIGHT). copy_mode면 무시.
     on_progress: on_progress(done, total) 콜백 (진행 표시용).
+    should_cancel: 호출하면 True/False를 돌려주는 콜러블. True가 되면 다음
+        클립 처리 전에 RuntimeError를 발생시켜 중단한다(이미 시작한 ffmpeg
+        호출은 끝까지 완료됨).
     """
     preset = preset or ENCODE_PRESET
     crf = ENCODE_CRF if crf is None else crf
@@ -456,8 +480,8 @@ def build_output(video, segments, out_path, workdir, title=None,
     _pre  = PRE_SEC  if pre_sec  is None else pre_sec
     _post = POST_SEC if post_sec is None else post_sec
     total = len(segments)
-    clip_paths = []
-    for i, seg in enumerate(segments):
+
+    def _encode_clip(i, seg):
         start = max(0.0, seg["peak"] - _pre)
         dur = _pre + _post
         clip = workdir / f"clip{i:03d}.mp4"
@@ -474,9 +498,32 @@ def build_output(video, segments, out_path, workdir, title=None,
         cmd += [str(clip), "-loglevel", "error"]
         # cwd=workdir: drawtext가 title_font.ttf 를 상대경로로 찾도록
         run(cmd, cwd=str(workdir))
-        clip_paths.append(clip)
-        if on_progress:
-            on_progress(i + 1, total)
+        return clip
+
+    # 클립별 재인코딩은 서로 독립적이므로 병렬 처리한다. ffmpeg는 별도 프로세스라
+    # GIL과 무관하게 실제로 동시에 돈다. concat 순서는 완료 순서가 아니라
+    # clip{i:03d}.mp4 파일명(i)으로 보장되므로 완료 순서는 상관없다.
+    clip_paths = [None] * total
+    done = 0
+    cancelled = False
+    workers = max(1, min(BUILD_CLIP_WORKERS, total or 1))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_encode_clip, i, seg): i
+                   for i, seg in enumerate(segments)}
+        for future in as_completed(futures):
+            i = futures[future]
+            clip_paths[i] = future.result()
+            done += 1
+            if on_progress:
+                on_progress(done, total)
+            if should_cancel and should_cancel():
+                cancelled = True
+                for f in futures:
+                    f.cancel()  # 아직 시작 안 된 것만 취소됨
+                break
+
+    if cancelled or (should_cancel and should_cancel()):
+        raise RuntimeError("취소됨")
 
     listfile = workdir / "concat.txt"
     # concat 데모서는 백슬래시를 이스케이프 문자로 해석하므로 Windows에서도
@@ -599,7 +646,7 @@ def main():
         if not video or not os.path.exists(video):
             sys.exit(f"파일을 찾을 수 없습니다: {video}")
 
-        print(f"[1/4] 영상 길이 확인...")
+        print("[1/4] 영상 길이 확인...")
         dur = probe_duration(video)
         print(f"      {dur:.1f}초")
 
@@ -633,7 +680,7 @@ def main():
             print(f"      토큰: 입력 {usage['in']:,} / 출력 {usage['out']:,} "
                   f"({usage['calls']}회 호출) ≈ ${cost:.4f}")
         else:
-            print(f"[3/4] 비전 판별 생략 — 오디오 후보 전체 사용")
+            print("[3/4] 비전 판별 생략 — 오디오 후보 전체 사용")
 
         # 결과 저장 (재선택용) — 비전 호출이 있었다면 특히 유용
         if args.save_json:

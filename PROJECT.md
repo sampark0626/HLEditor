@@ -22,12 +22,35 @@
 
 ## 파일
 
+이 프로젝트는 더 이상 단일 스크립트가 아니라 웹 UI 기반 배치 도구로 확장되었다. 2026-07 리팩터(Phase 1~4, [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) 참고)를 거치며 역할별 모듈로 세분화됐다.
+
 | 파일 | 설명 |
 |------|------|
-| `soccer_highlights.py` | 메인 스크립트. 전체 파이프라인 단일 파일로 구현 |
-| `PROJECT.md` | 이 문서 |
+| `soccer_highlights.py` | 오디오 분석 · Gemini 비전 판별 · 탈중복 · 영상 생성 파이프라인 (CLI로도 단독 실행 가능) |
+| `app.py` | Flask 앱 조립·시작만 담당하는 진입점 (실제 라우트는 아래 모듈에 분리) |
+| `jobs.py` | `JOBS` 상태 저장소·백그라운드 워커·`_process` 처리 파이프라인·`restore_recent_results` |
+| `routes_jobs.py` | 큐 관리·리뷰·영상 생성 API (`/api/jobs/*`) — Flask Blueprint |
+| `routes_auth.py` | YouTube OAuth·업로드 API (`/auth/youtube/*`, `/api/jobs/*/upload-youtube`) — Blueprint |
+| `routes_band.py` | BAND OAuth·게시 API (`/auth/band/*`, `/api/jobs/post-band`) — Blueprint |
+| `tray.py` | Windows 시스템 트레이 아이콘 |
+| `config.py` | `.env` 파싱, ffmpeg 확인, `output/`·`results/` 경로, 기본 제목/포트 등 공용 설정 |
+| `youtube_uploader.py` | YouTube OAuth 2.0 · 업로드 · 썸네일 · 챕터 설명 생성 |
+| `band_poster.py` | BAND OAuth 2.0 · 날짜별 게시글 작성 |
+| `templates/index.html` | 웹 UI 뼈대 (큐 관리 / 리뷰 / 영상 생성 3탭). CSS/JS는 정적 파일로 분리됨 |
+| `static/css/app.css` | 웹 UI 스타일 |
+| `static/js/{state,utils,notify,queue,pipeline,review,build,main}.js` | 웹 UI 로직. `main.js`가 가장 마지막에 로드되어 폴링·초기화를 담당 — 로드 순서가 곧 의존 순서다 |
+| `tests/` | pytest 테스트 (유닛 + Flask `test_client` 스모크) |
+| `pyproject.toml` | ruff(lint) 설정, pytest `testpaths` |
+| `requirements.txt` / `requirements-dev.txt` | 런타임 / 개발(pytest·ruff) 의존성 |
+| `README.md` | 설치·사용법 (사용자용) |
+| `PROJECT.md` | 이 문서 (설계 의도·핸드오프용) |
+| `IMPROVEMENT_PLAN.md` | 2026-07 리팩터 계획과 실행 로그 (무엇을 왜 바꿨는지의 상세 기록) |
+| `PRIVACY.md` | BAND API 심사용 개인정보처리방침 |
 
-스크립트 상단의 **조절 파라미터 블록**(`WIN_SEC` ~ `CONF_MAYBE`)이 동작의 거의 전부를 좌우한다. 로직보다 이 값들을 먼저 본다.
+`soccer_highlights.py` 상단의 **조절 파라미터 블록**(`WIN_SEC` ~ `CONF_MAYBE`)이 동작의 거의 전부를 좌우한다. 로직보다 이 값들을 먼저 본다.
+웹 UI로 실행할 때는 `python app.py`가 진입점이며, 아래 CLI 사용법은 `soccer_highlights.py`를 직접 스크립트로 돌릴 때만 해당한다.
+
+산출물은 `output/`(영상)·`results/`(판별 결과 JSON)에 저장된다. 자세한 경로 로직은 `config.py`의 `OUTPUT_DIR`/`RESULTS_DIR` 참고.
 
 ---
 
@@ -125,8 +148,8 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 - `-preset veryfast` → `ultrafast`로 변경 (품질 약간 희생, 속도 ↑)
 - 또는 segment 추출을 stream-copy(`-c copy`)로 바꾸는 방안 검토. 단 키프레임 경계 문제로 시작 지점이 어긋날 수 있어, 정확도가 중요하면 현행 재인코딩 유지
 
-### 3. 병렬화 여지 (개선 후보)
-현재 비전 판별은 후보를 순차 처리한다. 30분 영상에서 후보가 많으면 느리므로, Claude Code로 이어서 작업한다면 **비전 호출 병렬화**(예: `concurrent.futures`로 동시 N개 호출)가 가장 효과적인 개선 지점이다. Gemini API rate limit을 고려해 동시성 4~8 정도로.
+### 3. 병렬화 (완료)
+~~현재 비전 판별은 후보를 순차 처리한다~~ → ✅ 비전 판별(`classify_all_parallel`)과 빌드 클립 재인코딩(`build_output`) 모두 `ThreadPoolExecutor`로 병렬화 완료(동시성은 각각 `VISION_WORKERS`=6, `BUILD_CLIP_WORKERS`=3). 아래 "향후 개선 아이디어" 1번 및 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) Phase 4-4 참고.
 
 ### 4. 메모리
 오디오는 16kHz mono로 추출하므로 30분이어도 약 60MB 수준, 문제 없음. 프레임은 후보 구간만 그때그때 추출·삭제하므로 누적되지 않음.
@@ -142,11 +165,11 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 3. ~~재선택 모드~~ ✅ 구현됨 (`--from-json` + `--conf`)
 4. ~~로컬 웹 UI~~ ✅ 구현됨 (`app.py` + `templates/index.html`) — 4단계 클릭 워크플로, 진행 로그, 슬라이더 재선택
 5. ~~503/429 재시도 + 예외 격리~~ ✅ 구현됨 — `classify_with_gemini` 지수 백오프, 후보 단위 격리(프레임추출/API 모두), ffmpeg spawn WinError 5 재시도(`run`)
-6. ~~비전 판별 중단~~ ✅ 구현됨 — `should_cancel` 콜백 + `/api/cancel` + UI 중단 버튼
+6. ~~비전 판별 중단~~ ✅ 구현됨 — `should_cancel` 콜백 + `/api/jobs/<jid>/cancel` + UI 취소 버튼(잡별 개별 취소, 빌드 단계도 동일 메커니즘 적용)
 7. ~~토큰 사용량/비용 표시~~ ✅ 구현됨 — `usage_metadata` 합산, CLI/UI에 입출력 토큰·예상 USD 표시
 8. ~~타이틀 워터마크~~ ✅ 구현됨 — 우상단 `drawtext`(`--title` / UI 입력), 폰트를 작업폴더 복사로 Windows 콜론 문제 회피
 9. ~~자동 검출 기준 UI 노출~~ ✅ 구현됨 — `SENSITIVITY_PRESETS`(more/normal/strict) + UI 3단 버튼("많이 잡기/보통/엄선"). `detect_spikes(percentile,min_db)` 오버라이드, `/api/detect`에 `sensitivity` 전달. dB·percentile 용어 숨김.
-10. ~~단계별 진행 표시(프로그레스 바)~~ ✅ 구현됨 — `on_progress` 콜백 + 공유 `PROGRESS` + `/api/progress` 폴링. UI에서 비전판별("32/72") / 영상생성("클립 18/53") 진행 바 표시.
+10. ~~단계별 진행 표시(프로그레스 바)~~ ✅ 구현됨 — `on_progress` 콜백이 잡별 `progress` 필드를 갱신하고, `/api/jobs` 폴링(2초 간격)에 실려 옴. UI에서 비전판별("32/72") / 영상생성("클립 18/53") 진행 바 표시.
 11. ~~stream-copy 분기~~ ✅ 구현됨 — `QUALITY_PRESETS`의 `copy` 모드(`-c copy`, 재인코딩 없음). 단 타이틀/다운스케일 미적용.
 12. ~~인코딩 속도·용량 튜닝~~ ✅ 구현됨 — 기본 `fast`+`CRF 25`로 변경, `QUALITY_PRESETS`(size/balanced/quality/copy)를 UI/CLI에서 선택(`--quality`).
 
@@ -163,16 +186,28 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 - **STT 보조 신호** — 현장음에서 "골!"·"슛!" 등 외침을 Speech-to-Text로 인식해 볼륨·비전이 애매한 후보의 점수를 보강하는 3차 신호. 동호회 경기는 해설 없고 웅성거림 위주라 인식률이 낮아 효과 불확실. 추후 정확도를 더 끌어올려야 할 때 재검토.
 
 ### 코드 구조 메모 (Claude Code용)
-- 비전 판별 루프는 `main()` 일반 모드의 `[3/4]` 블록. 여기서 후보별 `classify_with_gemini` 호출을 `ThreadPoolExecutor`로 감싸면 병렬화된다. 각 후보 dict에 결과를 `update`하는 방식이라 순서 의존성이 없어 병렬화가 쉽다.
+- 비전 판별(`classify_all_parallel`)과 빌드 클립 인코딩(`build_output`)은 둘 다 `ThreadPoolExecutor`로 병렬화돼 있다. 두 곳 모두 완료 순서와 무관하게 원본 인덱스로 결과를 재조립하는 동일한 패턴을 쓴다 — 새로운 병렬 작업을 추가할 때 이 패턴을 참고.
 - 후보 선택 로직은 `select_segments()`로 분리돼 있어, 비전 결과만 채워지면 일반 모드/재선택 모드가 동일 함수를 쓴다.
-- `save_results()` / `--from-json` 경로 덕분에, 병렬화 작업 중에도 비전을 한 번 저장해두면 반복 테스트 시 API를 다시 안 써도 된다.
+- `save_results()` / `--from-json` 경로 덕분에, 반복 테스트 시 비전 API를 다시 안 써도 된다. 웹 앱에서는 이 결과 JSON(`results/results_{jid}.json`)을 `jobs.restore_recent_results()`가 재시작 시 스캔해 24시간 이내 것만 복원한다.
+- 잡 상태(`jobs.JOBS`)는 프로세스 메모리에만 있고 영속화되지 않는다. `jobs.py`의 모든 접근은 `JLOCK`으로 보호해야 한다 — 새 필드를 추가하거나 순회하는 코드를 쓸 때 반드시 `with jobs.JLOCK:` 안에서 하거나, 스냅샷을 뜬 뒤 락 밖에서 쓸 것 (Phase 1에서 락 없이 순회하다 생긴 레이스를 여러 건 고쳤음).
+- 잡 취소는 `cancel_requested`/`pending_delete` 두 플래그로 처리한다. 처리 중인 잡을 삭제하면 즉시 제거하지 않고 취소 플래그만 세운 뒤, 워커/빌드 루프가 다음 체크포인트(`should_cancel` 콜백)에서 감지해 실제로 정리한다(`jobs.finalize_pending_delete`). 이 흐름을 건드릴 때는 반드시 "처리 중 삭제" 시나리오를 재현해 워커가 죽지 않는지 확인할 것 — Phase 1의 치명 버그가 바로 이 지점이었다.
+- 정적 JS는 `static/js/*.js`가 classic `<script>` 태그로 로드 순서대로 로드된다(ES 모듈 아님). `state.js`가 가장 먼저 로드되어 전역 변수·`window.HL_CONFIG` 파생 상수를 선언하고, `main.js`가 가장 마지막에 로드되어 `poll()`과 초기화 호출을 담당한다. 새 파일을 추가할 때 이 순서를 깨지 않아야 한다(전역 렉시컬 스코프를 공유하므로 늦게 로드된 파일이 먼저 로드된 파일의 `let`/`const`를 그대로 참조 가능).
 
 ---
 
 ## 환경 의존성
-- Python 3.x, `numpy`, `scipy`, `google-genai`
+- Python 3.x — 런타임 의존성은 `requirements.txt`(버전 범위 고정), 개발용은 `requirements-dev.txt`(pytest, ruff)
 - `ffmpeg` / `ffprobe` (PATH에 있어야 함)
-- `GEMINI_API_KEY` 환경변수 (비전 사용 시)
+- `GEMINI_API_KEY` 환경변수 (비전 사용 시). 없으면 비전 판별 없이 오디오 후보 전체를 채택 취급하고 UI에 배지로 알림
+- 웹 UI 실행 시: `flask`, `google-api-python-client`, `google-auth-oauthlib`, `google-auth-httplib2`, `requests`, `pillow`, `pystray`(트레이 아이콘, 선택)
+
+## 테스트·lint
+```bash
+pip install -r requirements-dev.txt
+pytest              # tests/ 전체 실행
+ruff check .        # lint (--fix로 안전한 항목 자동 수정)
+```
+`tests/`는 ffmpeg/Gemini 실호출 없이 동작하도록 설계됐다(오디오 검출은 합성 신호로, Flask 라우트는 `jobs.JOBS`에 상태를 직접 주입하고 `build_output`을 몽키패치로 목 처리). 새 기능을 추가하면 여기에 대응하는 테스트를 먼저 확인/추가하는 것을 권장.
 
 ## 도메인 메모
 - 카메라: XbotGo 고정 광각 풀샷 (AI 카메라). 선수·공이 작게 보이는 점이 비전 판별 난이도에 영향

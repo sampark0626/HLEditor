@@ -5,8 +5,8 @@ setup_shortcut.py — HLEditor 바탕화면 바로가기 생성 (Windows, 최초
     python setup_shortcut.py
 """
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -100,7 +100,7 @@ def main():
         print(f"\n바탕화면에 바로가기가 생성되었습니다: {shortcut}")
         print("HLEditor.lnk 를 더블클릭하면 앱이 시작됩니다.\n")
     else:
-        print(f"\n수동으로 바로가기를 만들려면:")
+        print("\n수동으로 바로가기를 만들려면:")
         print(f"  대상: {vbs}")
         print(f"  아이콘: {ico}\n")
 

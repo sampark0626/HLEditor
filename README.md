@@ -29,13 +29,32 @@
 
 | 파일 | 설명 |
 |------|------|
-| `app.py` | Flask 웹 서버 · 배치 잡 관리 · OAuth 인증 엔드포인트 |
-| `soccer_highlights.py` | 오디오 분석 · Gemini 비전 판별 · 탈중복 · 영상 생성 파이프라인 |
+| `app.py` | Flask 앱 조립·시작 (진입점). 라우트/잡 처리 로직은 아래 모듈로 분리됨 |
+| `jobs.py` | 배치 잡 상태 저장소·백그라운드 워커·오디오/비전 처리 파이프라인 |
+| `routes_jobs.py` | 큐 관리·리뷰·영상 생성 API (Flask Blueprint) |
+| `routes_auth.py` | YouTube OAuth 인증·업로드 API (Flask Blueprint) |
+| `routes_band.py` | BAND OAuth 인증·게시 API (Flask Blueprint) |
+| `tray.py` | Windows 시스템 트레이 아이콘 |
+| `config.py` | `.env` 파싱·ffmpeg 확인 등 공용 설정 헬퍼 |
+| `soccer_highlights.py` | 오디오 분석 · Gemini 비전 판별 · 탈중복 · 영상 생성 파이프라인 (CLI로도 단독 실행 가능) |
 | `youtube_uploader.py` | YouTube OAuth 2.0 · 영상 업로드 · 썸네일 추출 · 챕터 설명 생성 |
 | `band_poster.py` | BAND OAuth 2.0 · 날짜별 게시글 작성 |
+| `templates/index.html` | 웹 UI 뼈대 (큐 관리 / 리뷰 / 영상 생성 3탭) |
+| `static/css/app.css` | 웹 UI 스타일 |
+| `static/js/*.js` | 웹 UI 로직 (state·utils·queue·review·build·pipeline·notify·main) |
+| `tests/` | pytest 유닛/통합 테스트 |
+| `pyproject.toml` | ruff(lint) · pytest 설정 |
 | `.env` | API 키·OAuth 설정 (git 제외, `.env.example` 참고) |
 | `client_secrets.json` | Google OAuth 클라이언트 설정 (git 제외) |
 | `PRIVACY.md` | BAND API 심사용 개인정보처리방침 |
+| `PROJECT.md` | 설계 의도·핸드오프 문서 (Claude Code 작업 인수인계용) |
+
+실행 시 생성되는 디렉터리:
+
+| 디렉터리 | 내용 |
+|---------|------|
+| `output/` | 생성된 하이라이트 영상 (mp4) |
+| `results/` | 잡별 비전 판별 결과 JSON (`results_{잡ID}.json`) — 24시간 이내 것은 서버 재시작 시 리뷰 큐로 자동 복원됨 |
 
 ---
 
@@ -44,15 +63,13 @@
 ### 1) 의존성
 
 ```bash
-pip install flask numpy scipy google-genai \
-            google-api-python-client google-auth-oauthlib google-auth-httplib2 \
-            requests
+pip install -r requirements.txt
 ```
 
-또는:
+개발(테스트·lint)까지 하려면:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 `ffmpeg` / `ffprobe` 가 PATH에 있어야 합니다.
@@ -82,6 +99,10 @@ YOUTUBE_PRIVACY=public
 BAND_CLIENT_ID=
 BAND_CLIENT_SECRET=
 BAND_TARGET_KEY=
+
+# 앱 공통 설정 (선택)
+# DEFAULT_TITLE=우리 팀 경기영상   # 워터마크·YouTube 제목 기본값 (기본: 한울타리 FC 경기영상)
+# HL_PORT=5000                    # 웹 서버 포트 (바꾸면 YouTube/BAND 리디렉션 URI도 재등록 필요)
 ```
 
 ---
@@ -111,8 +132,10 @@ python app.py
 | **BAND까지 원스톱** | 위 전체 + BAND 게시 (완전 자동) |
 
 4. 원스톱 진행 중에는 단계별 진행 바가 표시되며 **취소** 버튼으로 중단 가능
-5. 처리 현황에서 진행률·예상 잔여 시간·비용 확인
+5. 처리 현황에서 진행률·예상 잔여 시간·비용 확인. 처리 중인 영상은 개별 **취소** 버튼으로도 중단 가능
 6. 오류 발생 시 **재시도** 버튼으로 재처리
+7. `GEMINI_API_KEY`가 없어 비전 판별을 생략한 영상에는 "⚠ AI 판별 생략됨" 배지가 표시됨(이 경우 후보 전체가 자동 채택 취급됨)
+8. **서버 로그** 카드의 "보기/새로고침" 버튼으로 `app.log` 최근 내용을 바로 확인 가능(문제 발생 시 원인 파악용)
 
 > 처리 완료 시 브라우저 데스크톱 알림을 받으려면 알림 권한을 허용하세요.
 
@@ -120,9 +143,10 @@ python app.py
 
 1. 처리 완료된 영상이 아코디언으로 표시됨
 2. **전체 신뢰도 슬라이더** — 전체 적용 시 모든 영상의 채택 기준을 한 번에 조정
-3. 영상별로 펼쳐 후보 목록 확인 (AI 설명·신뢰도·유형 포함)
-4. 체크박스로 구간을 포함/제외 후 **저장 & 다음** → 다음 미검토 영상으로 자동 이동
-5. **AI 판단으로 전체 저장 & 영상 생성** — 신뢰도 임계 기준으로 일괄 저장 후 생성 시작
+3. 영상별로 펼쳐 후보 목록 확인 (썸네일·AI 설명·신뢰도·유형 포함)
+4. 후보 행의 **▶ 미리보기** 버튼으로 원본 영상의 해당 구간을 바로 재생해 실제 장면 확인 가능
+5. 체크박스로 구간을 포함/제외 후 **저장 & 다음** → 다음 미검토 영상으로 자동 이동
+6. **AI 판단으로 전체 저장 & 영상 생성** — 신뢰도 임계 기준으로 일괄 저장 후 생성 시작
 
 > 채택 구간이 0개인 영상은 "하이라이트 없음" 경고가 표시됩니다. 임계를 낮추거나 직접 선택하세요.
 
@@ -135,8 +159,10 @@ python app.py
    - 설명: **득점(goal) 구간만** 챕터 타임스탬프로 표기
    - 제목: `베이스 | 영상명 | 날짜` 형식으로 영상별 자동 차별화
 4. **생성 후 자동 YouTube 업로드** 옵션 켜면 생성 완료 즉시 자동 업로드
+   - 안전을 위해 이 옵션은 **세션 동안만 유지**되고 저장되지 않습니다 — 새로고침·재시작 후에는 항상 꺼진 상태로 시작하므로 매번 다시 켜야 합니다.
 5. YouTube 업로드 완료 후 **BAND에 게시** → 같은 날짜 영상 링크를 한 게시글에 묶어 게시
 6. 파이프라인 요약 바에서 생성·업로드·게시 진행 상황 한눈에 확인
+7. 제목·파일명 입력 중에는 자동 새로고침으로 커서 위치가 흐트러지지 않습니다
 
 ---
 
@@ -186,12 +212,37 @@ python app.py
 
 ---
 
+## 산출물 및 재시작 시 복원
+
+- 생성된 하이라이트 영상은 `output/`, 잡별 판별 결과 JSON은 `results/`에 저장됩니다.
+- 앱 시작 시 `results/`에 있는 **24시간 이내** 결과는 자동으로 리뷰 큐에 "준비됨" 상태로 복원됩니다(서버가 재시작돼도 방금 처리한 결과를 다시 볼 수 있음). 그보다 오래된 결과나 원본 영상 파일이 사라진 경우는 복원되지 않습니다.
+- 앱 시작 시 이전 세션에서 남은 임시 작업폴더도 자동 정리됩니다.
+
+---
+
+## 개발자용 (테스트 · lint)
+
+```bash
+pip install -r requirements-dev.txt
+
+# 테스트 실행
+pytest
+
+# lint 검사 (자동 수정: ruff check . --fix)
+ruff check .
+```
+
+`tests/`에 순수 로직(오디오 스파이크 검출, 후보 선택, YouTube 설명 생성, BAND 게시 포맷 등) 유닛 테스트와 Flask API 스모크 테스트가 있습니다. 실제 ffmpeg/Gemini 호출 없이 동작하도록 목(mock) 처리돼 있어 빠르게 실행됩니다.
+
+---
+
 ## 주의사항
 
 - `client_secrets.json`, `youtube_token.json`, `band_token.json`, `.env`는 `.gitignore`에 등록되어 있어 git에 올라가지 않습니다.
 - YouTube 업로드는 본인 채널에만 가능합니다. 썸네일 업로드는 채널 전화번호 인증이 필요할 수 있습니다.
 - 원스톱 BAND 게시는 `.env`의 `BAND_TARGET_KEY`를 사용합니다. 설정되지 않은 경우 영상 생성 탭에서 수동 게시하세요.
 - ffmpeg가 PATH에 없으면 영상 처리가 실패합니다. 오류 발생 시 앱 상단 배너의 설치 안내를 따르세요.
+- `HL_PORT`로 포트를 바꾸면 YouTube/BAND 리디렉션 URI도 각 개발자 콘솔에서 함께 변경해야 합니다.
 
 ---
 
