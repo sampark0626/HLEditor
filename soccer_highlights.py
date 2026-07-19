@@ -36,6 +36,7 @@ import numpy as np
 from scipy.io import wavfile
 
 import pan_signal
+import config
 
 # Windows cp949 콘솔에서 진행 로그의 이모지(✅⚠️❌)를 print할 때
 # UnicodeEncodeError가 발생해 처리 스레드가 죽는 것을 방지 — stdout/stderr를
@@ -62,8 +63,8 @@ PRE_SEC        = 8.0    # 급증(peak) 시점 기준 앞으로 포함할 길이 
 POST_SEC       = 5.0    # 급증 시점 기준 뒤로 포함할 길이 (초)
 
 FRAME_INTERVAL = 0.5    # 비전 판별용 프레임 추출 간격 (초)
-MAX_FRAMES     = 8      # 후보당 Gemini에 보낼 최대 프레임 수
-VISION_MODEL   = "gemini-2.5-flash"   # 비용/속도 균형. 정확도 더 원하면 gemini-2.5-pro
+MAX_FRAMES     = int(config.get_env("MAX_FRAMES", "12"))      # 후보당 Gemini에 보낼 최대 프레임 수
+VISION_MODEL   = config.get_env("GEMINI_MODEL", "gemini-2.5-flash")   # 비용/속도 균형. 정확도 더 원하면 gemini-2.5-pro
 VISION_WORKERS = 6      # 비전 호출 동시 병렬 수 (Gemini rate limit 고려해 4~8 권장)
 VISION_RETRIES = 4      # 503/429 등 일시적 오류 시 후보당 최대 재시도 횟수
 RETRY_BASE_SEC = 2.0    # 재시도 지수 백오프 기준 (2,4,8,... 초 + 지터)
@@ -100,9 +101,13 @@ TITLE_FONT     = r"C:\Windows\Fonts\NanumGothic.ttf"  # 한글 지원 폰트
 TITLE_FONTSIZE = 22
 TITLE_MARGIN   = 24     # 우/상단 여백 (px)
 
-# --- Gemini 2.5 Flash 단가 (USD per 1M tokens, 2025 기준 추정) ---
-PRICE_IN_PER_M  = 0.30
-PRICE_OUT_PER_M = 2.50
+# --- Gemini 단가 (USD per 1M tokens, 모델별 가변) ---
+if "pro" in VISION_MODEL.lower():
+    PRICE_IN_PER_M  = 3.00
+    PRICE_OUT_PER_M = 9.00
+else:
+    PRICE_IN_PER_M  = 0.30
+    PRICE_OUT_PER_M = 2.50
 
 
 # ----------------------------------------------------------------------------
