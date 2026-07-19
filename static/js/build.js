@@ -307,12 +307,17 @@ function updateBandCard() {
   if (bandAuth && !bandListLoaded) loadBands();
 }
 
-function updateBandPreview() {
+function updateBandPreview(jobIdsSet = null) {
   const prev = document.getElementById("band-post-preview");
-  if (!prev) return;
-  const uploaded = allJobs.filter(j => j.yt_status === "done" && j.yt_url
+  if (!prev) return "";
+  let uploaded = allJobs.filter(j => j.yt_status === "done" && j.yt_url
     && j.band_status !== "done");
-  if (!uploaded.length) { prev.textContent = "게시할 새 링크 없음"; return; }
+
+  if (jobIdsSet) {
+    uploaded = uploaded.filter(j => jobIdsSet.has(j.id));
+  }
+
+  if (!uploaded.length) { prev.textContent = "게시할 새 링크 없음"; return ""; }
 
   // 날짜별 그룹핑 미리보기
   const groups = {};
@@ -330,7 +335,9 @@ function updateBandPreview() {
     pairs.forEach(([n, u]) => { text += `· ${n}\n${u}\n\n`; });
     text += "HLEditor 자동 생성\n\n---\n";
   }
-  prev.textContent = text.trim();
+  const result = text.trim();
+  prev.textContent = result;
+  return result;
 }
 
 async function copyBandText(silent = false) {

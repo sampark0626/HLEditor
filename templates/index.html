@@ -98,7 +98,9 @@
           <select id="run-mode" class="sens-sel" onchange="onRunModeChange(this.value)" style="min-width:180px">
             <option value="manual" selected>수동 리뷰 (리뷰 후 직접 빌드)</option>
             <option value="youtube">YouTube 업로드까지 자동 진행</option>
+            {% if band_auth %}
             <option value="band">BAND 게시까지 자동 진행</option>
+            {% endif %}
           </select>
         </label>
 

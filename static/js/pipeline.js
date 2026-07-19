@@ -240,7 +240,7 @@ async function advancePipeline(jobs) {
         (d.errors||[]).forEach(e2 => logLine(`BAND 오류: ${e2.error}`, "fail"));
         
         // BAND 게시 성공 시에도 작성글 및 상세 팝업 표시
-        updateBandPreview();
+        updateBandPreview(_pipe ? _pipe.jobIds : null);
         const postText = document.getElementById("band-post-preview")?.textContent || "";
         showCompletionModal(postText + "\n\n(위 내용이 BAND에 직접 게시되었습니다.)");
       } catch(e) { logLine("[원스톱] BAND 게시 오류: " + e.message, "fail"); }
@@ -248,7 +248,7 @@ async function advancePipeline(jobs) {
       document.getElementById("pipe-detail").textContent = "모든 단계 완료!";
       _pipeDone();
       // BAND API 게시 후에도 텍스트 클립보드 복사 (백업)
-      updateBandPreview();
+      updateBandPreview(_pipe ? _pipe.jobIds : null);
       copyBandText(true).catch(() => {});
     } else {
       // youtube 모드: 업로드 완료 후 BAND 글 자동 준비 단계로
@@ -260,7 +260,7 @@ async function advancePipeline(jobs) {
   } else if (step === "band_copy") {
     if (elapsed < PIPE_STEP_DELAY) return;
     document.getElementById("pipe-detail").textContent = "BAND 게시 텍스트 클립보드 복사 중…";
-    updateBandPreview();
+    updateBandPreview(_pipe ? _pipe.jobIds : null);
     const postText = document.getElementById("band-post-preview")?.textContent || "";
     showCompletionModal(postText);
     try {
