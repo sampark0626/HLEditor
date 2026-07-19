@@ -287,7 +287,8 @@ def _is_transient(exc):
         return True
     msg = str(exc).upper()
     return any(k in msg for k in ("UNAVAILABLE", "503", "429", "RESOURCE_EXHAUSTED",
-                                  "OVERLOADED", "DEADLINE", "INTERNAL"))
+                                  "OVERLOADED", "DEADLINE", "INTERNAL",
+                                  "11001", "GETADDRINFO", "CONNECTION", "TIMEOUT"))
 
 
 def classify_with_gemini(frames, client):
