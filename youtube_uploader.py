@@ -106,11 +106,17 @@ def exchange_code(code: str, redirect_uri: str, state: str = "") -> None:
 
 
 def is_authenticated() -> bool:
-    """현재 유효한 인증 토큰이 있는지 확인."""
+    """현재 유효한 인증 토큰이 있는지 확인하고, 실제 API 호출을 통해 검증한다."""
+    if not TOKEN_FILE.exists():
+        return False
     try:
-        creds = _get_credentials()
-        return creds is not None and (creds.valid or bool(creds.refresh_token))
+        channel = get_channel_info()
+        if not channel:
+            revoke()
+            return False
+        return True
     except Exception:
+        revoke()
         return False
 
 
