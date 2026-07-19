@@ -2,10 +2,43 @@
 
 // 버튼 잠금/해제
 function _pipeBtns(disabled) {
-  ["btn-add","btn-onestop-yt","btn-onestop-band"].forEach(id => {
+  ["btn-add", "run-mode"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = disabled;
   });
+}
+
+// 작업 모드 변경 핸들러
+function onRunModeChange(val) {
+  const descEl = document.getElementById("run-mode-desc");
+  const btnEl = document.getElementById("btn-add");
+  if (!descEl || !btnEl) return;
+  
+  if (val === "manual") {
+    btnEl.textContent = "🚀 작업 시작";
+    btnEl.className = "";
+    descEl.textContent = "수동 리뷰: 분석 완료 후 [리뷰] 탭에서 검토할 수 있습니다.";
+  } else if (val === "youtube") {
+    btnEl.textContent = "🚀 원스톱 자동화 시작";
+    btnEl.className = "accent-btn";
+    descEl.textContent = "YouTube 자동화: 분석 후 자동 승인 → 인코딩 → YouTube 업로드 → BAND 코멘트 준비까지 한 번에 처리합니다.";
+  } else if (val === "band") {
+    btnEl.textContent = "🚀 원스톱 자동화 시작";
+    btnEl.className = "accent-btn";
+    descEl.textContent = "BAND 자동화: 분석 후 자동 승인 → 인코딩 → YouTube 업로드 → BAND 직접 게시까지 완전히 자동으로 끝냅니다.";
+  }
+  localStorage.setItem("hl_run_mode", val);
+}
+window.onRunModeChange = onRunModeChange;
+
+// 작업 시작 진입점
+async function doStartPipeline() {
+  const mode = document.getElementById("run-mode").value;
+  if (mode === "manual") {
+    await doAdd();
+  } else {
+    await doOnestop(mode);
+  }
 }
 
 // 파이프라인 시작
@@ -205,6 +238,11 @@ async function advancePipeline(jobs) {
         logLine(`[원스톱] BAND 게시 완료: ${n}개 링크`, "done");
         sendNotif("원스톱 완료", "YouTube 업로드 및 BAND 게시가 완료되었습니다.");
         (d.errors||[]).forEach(e2 => logLine(`BAND 오류: ${e2.error}`, "fail"));
+        
+        // BAND 게시 성공 시에도 작성글 및 상세 팝업 표시
+        updateBandPreview();
+        const postText = document.getElementById("band-post-preview")?.textContent || "";
+        showCompletionModal(postText + "\n\n(위 내용이 BAND에 직접 게시되었습니다.)");
       } catch(e) { logLine("[원스톱] BAND 게시 오류: " + e.message, "fail"); }
       _pipeSetStep("done");
       document.getElementById("pipe-detail").textContent = "모든 단계 완료!";
@@ -223,13 +261,15 @@ async function advancePipeline(jobs) {
     if (elapsed < PIPE_STEP_DELAY) return;
     document.getElementById("pipe-detail").textContent = "BAND 게시 텍스트 클립보드 복사 중…";
     updateBandPreview();
+    const postText = document.getElementById("band-post-preview")?.textContent || "";
+    showCompletionModal(postText);
     try {
       await copyBandText(true);
       logLine(`[원스톱] 완료! BAND 게시 텍스트가 클립보드에 복사됐습니다.`, "done");
       sendNotif("원스톱 완료", "YouTube 업로드 완료 · BAND 게시 텍스트가 클립보드에 복사됐습니다.");
     } catch(e) {
-      logLine(`[원스톱] 완료! (BAND 텍스트 자동복사 실패 — 영상 생성 탭에서 수동 복사하세요)`, "done");
-      sendNotif("원스톱 완료", "YouTube 업로드 완료 · BAND 탭에서 게시 텍스트를 복사하세요.");
+      logLine(`[원스톱] 완료! (클립보드 자동 복사 실패 — 팝업창에서 직접 복사해 주세요)`, "done");
+      sendNotif("원스톱 완료", "YouTube 업로드 완료.");
     }
     // 영상 생성 탭으로 이동해 BAND 게시 카드 표시
     go("build");
@@ -237,4 +277,35 @@ async function advancePipeline(jobs) {
     document.getElementById("pipe-detail").textContent = "YouTube 업로드 + BAND 글 준비 완료!";
     _pipeDone();
   }
+}
+
+// 완료 팝업 모달 제어 함수군
+function showCompletionModal(text) {
+  const modal = document.getElementById("completion-modal");
+  const modalText = document.getElementById("modal-band-text");
+  if (modal && modalText) {
+    modalText.value = text.trim();
+    modal.style.display = "flex";
+  }
+}
+
+function closeCompletionModal() {
+  const modal = document.getElementById("completion-modal");
+  if (modal) {
+    modal.style.display = "none";
+  }
+}
+
+async function copyModalBandText() {
+  const modalText = document.getElementById("modal-band-text");
+  const resultEl = document.getElementById("modal-copy-result");
+  if (!modalText || !resultEl) return;
+  try {
+    await navigator.clipboard.writeText(modalText.value);
+    resultEl.innerHTML = '<span style="color:var(--accent);font-weight:600">✓ 복사 성공!</span>';
+  } catch(e) {
+    modalText.select();
+    resultEl.innerHTML = '<span class="hint">복사 실패. 드래그된 텍스트를 Ctrl+C로 복사하세요.</span>';
+  }
+  setTimeout(() => { if (resultEl) resultEl.innerHTML = ""; }, 4000);
 }

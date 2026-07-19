@@ -84,4 +84,11 @@ function applyRestoredUI() {
     au.disabled = !ytAuth;
     if (!ytAuth && na) na.textContent = "(YouTube 인증 후 사용 가능)";
   }
+  // 작업 모드 복원
+  const savedMode = localStorage.getItem("hl_run_mode") || "manual";
+  const runModeSel = document.getElementById("run-mode");
+  if (runModeSel) {
+    runModeSel.value = savedMode;
+    setTimeout(() => { if (window.onRunModeChange) window.onRunModeChange(savedMode); }, 50);
+  }
 }
