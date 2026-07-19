@@ -249,27 +249,43 @@ def detect_spikes_from_signal(sr, data, percentile=None, min_db=None,
 
 
 # ----------------------------------------------------------------------------
-def extract_frames(video, peak, workdir, idx, pre_sec=None, post_sec=None):
-    """후보 구간(peak 앞뒤)에서 프레임을 추출해 경로 리스트 반환."""
+def extract_video_clip_and_thumbnail(video, peak, workdir, idx, pre_sec=None, post_sec=None):
+    """후보 구간(peak 앞뒤)을 잘라 저용량 mp4 파일로 인코딩하고 대표 썸네일(JPEG) 1장도 함께 추출."""
     pre_sec  = PRE_SEC  if pre_sec  is None else pre_sec
     post_sec = POST_SEC if post_sec is None else post_sec
     seg_start = max(0.0, peak - pre_sec)
     seg_len = pre_sec + post_sec
-    out_pat = workdir / f"cand{idx}_%03d.jpg"
-    run(["ffmpeg", "-y", "-ss", f"{seg_start:.2f}", "-i", video,
-         "-t", f"{seg_len:.2f}", "-vf", f"fps=1/{FRAME_INTERVAL},scale=640:-1",
-         "-q:v", "4", str(out_pat), "-loglevel", "error"])
-    frames = sorted(workdir.glob(f"cand{idx}_*.jpg"))
-    # 너무 많으면 균등 샘플링
-    if len(frames) > MAX_FRAMES:
-        sel = np.linspace(0, len(frames) - 1, MAX_FRAMES).astype(int)
-        frames = [frames[i] for i in sel]
-    return frames
+    video_path = workdir / f"cand{idx}.mp4"
+    
+    # 1. 비디오 클립 추출 (480p 저해상도 + 매우 빠른 인코딩 + 높은 CRF로 용량 대폭 축소)
+    cmd_video = [
+        "ffmpeg", "-y", "-ss", f"{seg_start:.2f}", "-i", video,
+        "-t", f"{seg_len:.2f}", "-vf", "scale=-2:480",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "64k",
+        str(video_path), "-loglevel", "error"
+    ]
+    run(cmd_video)
+    
+    # 2. 대표 썸네일 프레임 추출 (세그먼트 중간 시점, Web UI 리뷰 탭 렌더링용)
+    thumb_path = workdir / f"cand{idx}_000.jpg"
+    thumb_ts = seg_start + (seg_len / 2.0)
+    cmd_thumb = [
+        "ffmpeg", "-y", "-ss", f"{thumb_ts:.2f}", "-i", video,
+        "-vframes", "1", "-vf", "scale=640:-1",
+        str(thumb_path), "-loglevel", "error"
+    ]
+    try:
+        run(cmd_thumb)
+    except Exception:
+        pass  # 썸네일 추출 실패는 파이프라인 진행을 중단시키지 않음
+        
+    return video_path
 
 
 # ----------------------------------------------------------------------------
 VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 유튜브 하이라이트 영상의 전문 편집자입니다.
-제공된 이미지들은 한 후보 구간에서 0.5초 간격으로 추출한 연속 프레임입니다.
+제공된 파일은 한 후보 구간의 축구 경기 비디오 클립입니다.
 
 [카메라 특성 및 분석 방법]
 - 카메라는 AI 추적 카메라(XbotGo 등)로, 공과 경기 흐름을 따라 좌우로 패닝(회전)합니다.
@@ -306,8 +322,8 @@ def _is_transient(exc):
                                   "11001", "GETADDRINFO", "CONNECTION", "TIMEOUT"))
 
 
-def classify_with_gemini(frames, client):
-    """프레임 묶음을 Gemini에 보내 (판별 결과 dict, 토큰 사용량 dict) 반환.
+def classify_with_gemini(video_path, client):
+    """비디오 클립 파일을 Gemini Files API에 업로드하여 판별하고 (판별 결과 dict, 토큰 사용량 dict) 반환.
 
     503(과부하)/429(rate limit) 같은 일시적 오류는 지수 백오프로 재시도한다.
     재시도까지 모두 실패하면 예외를 올려 호출부(_process)가 후보 단위로 격리한다.
@@ -315,17 +331,23 @@ def classify_with_gemini(frames, client):
     """
     from google.genai import types
 
-    parts = [types.Part.from_text(text=VISION_PROMPT)]
-    for fp in frames:
-        parts.append(types.Part.from_bytes(
-            data=fp.read_bytes(), mime_type="image/jpeg"))
-
     last_exc = None
     for attempt in range(VISION_RETRIES):
+        video_file = None
         try:
+            # 1. Files API를 통해 비디오 업로드
+            video_file = client.files.upload(file=video_path)
+            # 2. 비디오가 ACTIVE 상태가 될 때까지 폴링
+            while video_file.state.name == "PROCESSING":
+                time.sleep(1)
+                video_file = client.files.get(name=video_file.name)
+            if video_file.state.name == "FAILED":
+                raise RuntimeError("Gemini Files API video processing failed")
+                
+            # 3. 비디오 분석 호출
             resp = client.models.generate_content(
                 model=VISION_MODEL,
-                contents=[types.Content(role="user", parts=parts)],
+                contents=[video_file, types.Part.from_text(text=VISION_PROMPT)],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     response_mime_type="application/json",
@@ -341,6 +363,13 @@ def classify_with_gemini(frames, client):
             print(f"        (일시적 오류, {delay:.1f}s 후 재시도 "
                   f"{attempt+1}/{VISION_RETRIES-1}): {str(e)[:60]}")
             time.sleep(delay)
+        finally:
+            # 4. 업로드된 파일 삭제 (리소스 정리)
+            if video_file:
+                try:
+                    client.files.delete(name=video_file.name)
+                except Exception:
+                    pass
     else:  # pragma: no cover
         raise last_exc
 
@@ -376,19 +405,18 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
     usage_total = {"in": 0, "out": 0, "calls": 0}
 
     def _process(idx, cand):
-        # 프레임 추출(ffmpeg)도 후보 단위로 격리: 한 후보의 spawn 실패가
-        # 배치 전체를 죽이지 않도록 한다.
+        # 비디오 클립 및 썸네일 추출도 후보 단위로 격리
         try:
-            frames = extract_frames(video, cand["peak"], workdir, idx,
-                                    pre_sec=pre_sec, post_sec=post_sec)
+            video_path = extract_video_clip_and_thumbnail(video, cand["peak"], workdir, idx,
+                                                          pre_sec=pre_sec, post_sec=post_sec)
         except Exception as e:
             return idx, {"highlight": False, "type": "other", "confidence": 0.0,
-                         "reason": f"frame_error: {str(e)[:80]}"}, None
-        if not frames:
+                         "reason": f"clip_error: {str(e)[:80]}"}, None
+        if not video_path or not video_path.exists():
             return idx, {"highlight": False, "type": "other",
-                         "confidence": 0.0, "reason": "no_frames"}, None
+                         "confidence": 0.0, "reason": "no_video_clip"}, None
         try:
-            res, usage = classify_with_gemini(frames, client)
+            res, usage = classify_with_gemini(video_path, client)
             return idx, res, usage
         except Exception as e:
             # 한 후보가 재시도까지 실패해도 배치 전체를 죽이지 않고 격리한다.
