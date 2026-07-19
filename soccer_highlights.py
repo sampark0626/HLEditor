@@ -263,21 +263,31 @@ def extract_frames(video, peak, workdir, idx, pre_sec=None, post_sec=None):
 
 
 # ----------------------------------------------------------------------------
-VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 유튜브 하이라이트 영상의 편집자입니다.
-아래 이미지들은 한 후보 구간에서 0.5초 간격으로 추출한 연속 프레임입니다.
-카메라는 고정된 광각 풀샷이라 선수와 공이 작게 보일 수 있습니다.
+VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 유튜브 하이라이트 영상의 전문 편집자입니다.
+제공된 이미지들은 한 후보 구간에서 0.5초 간격으로 추출한 연속 프레임입니다.
 
-이 구간이 하이라이트(득점, 슈팅, 결정적 세이브, 빠른 역습, 골문 앞 밀집 공방 등)인지 판단하세요.
-단순한 패스 돌리기, 경기 중단, 킥오프 대기, 선수 이동만 있는 장면은 하이라이트가 아닙니다.
+[카메라 특성 및 분석 방법]
+- 카메라는 AI 추적 카메라(XbotGo 등)로, 공과 경기 흐름을 따라 좌우로 패닝(회전)합니다.
+- 카메라가 움직이므로 화면상의 배경이 이동할 수 있습니다. 이를 염두에 두고 공의 위치와 선수의 동작을 추적하세요.
+- 광각 풀샷이라 선수와 공이 작게 보일 수 있으니 꼼꼼히 관찰해야 합니다.
 
-reason 필드는 유튜브 축구 하이라이트 영상의 챕터 제목처럼 작성하세요.
-- 15자 이내의 짧고 임팩트 있는 한국어 문구
-- 장면을 구체적으로 묘사: 어떤 방식으로 골이 들어갔는지, 어떤 상황인지
-- 느낌표를 적절히 사용하여 흥미롭게
-- 예시: "선제골! 왼발 강슛", "헤딩골 성공!", "코너킥→헤딩 득점", "역전 쐐기골!", "페널티킥 성공!", "빠른 역습 골!", "프리킥 직접 골!", "결정적 세이브!", "골문 앞 혼전"
+[판단 기준]
+다음 기준을 참고하여 해당 구간이 진짜 하이라이트인지 엄격하게 판단하고, type을 올바르게 분류하세요:
+1. **goal (득점)**: 공이 골라인을 넘어가 골이 되는 순간, 혹은 골 직후 골망을 흔들거나 골 세레머니를 하는 장면이 명확히 관찰될 때.
+2. **shot (슈팅)**: 골대를 향한 슛(골 포스트를 벗어나거나 수비수에 막히는 등 득점이 되지 않은 상황).
+3. **save (세이브)**: 골키퍼가 상대의 슈팅을 쳐내거나 잡아내는 명확한 선방 동작.
+4. **attack (결정적 공격/공방)**: 골문 앞 혼전 상황, 위협적인 크로스, 코너킥/프리킥 세트피스 상황, 골대로 향하는 날카로운 패스나 돌파.
+5. **other (일반 플레이/비하이라이트)**: 단순 패스 돌리기, 빌드업, 골킥, 스로인, 드롭볼, 킥오프 대기, 경기 중단, 경기와 무관한 단순 움직임. 이 경우 `highlight`는 `false`로 설정하십시오.
 
-다음 JSON 형식으로만 답하세요. 다른 텍스트는 절대 포함하지 마세요:
-{"highlight": true/false, "type": "goal|shot|save|attack|other", "confidence": 0.0~1.0, "reason": "유튜브 캡션 스타일 한 줄"}"""
+[출력 형식 및 작성 가이드]
+- **reason**: 유튜브 하이라이트 영상의 챕터 제목 스타일로 작성하세요.
+  - 15자 이내의 짧고 임팩트 있는 한국어 문구.
+  - 장면의 사실적 내용을 구체적으로 묘사하세요. (예: 어떤 방향에서, 누가, 어떻게 처리했는지)
+  - 확실하지 않은 득점은 득점으로 작성하지 마세요.
+  - 예시: "오른쪽 돌파 후 크로스", "아쉬운 헤더 슈팅", "골키퍼 정면 세이브!", "역습 상황 차단", "코너킥 기회", "선제골! 강한 오른발 슛", "골문 앞 혼전 상황"
+
+반드시 다음 JSON 형식으로만 응답해야 하며, 다른 부가 설명이나 백틱(```json 등)은 절대 포함하지 마십시오:
+{"highlight": true/false, "type": "goal|shot|save|attack|other", "confidence": 0.0~1.0, "reason": "사실 기반의 유튜브 캡션 한 줄"}"""
 
 
 def _is_transient(exc):
@@ -442,6 +452,53 @@ def _drawtext_filter(title, font_name):
             f"shadowcolor=black@0.5:shadowx=1:shadowy=1")
 
 
+def get_merged_timeline(selected_cands, pre_sec, post_sec):
+    """선택된 후보 구간들을 분석하여 겹치는 구간을 하나로 병합하고, 
+    최종 영상 내에서의 각 후보의 정확한 상대 peak 타임스탬프(초)를 계산한다.
+    
+    반환:
+      - merged_clips: [{"start": float, "end": float, "cands": [dict, ...]}]
+      - cand_timestamps: {id(cand_dict): float}  # candidate 객체 레퍼런스 id 기준 타임스탬프
+    """
+    if not selected_cands:
+        return [], {}
+
+    # 시작 시간 기준으로 정렬
+    sorted_cands = sorted(selected_cands, key=lambda c: float(c["peak"]) - pre_sec)
+    
+    merged_clips = []
+    for c in sorted_cands:
+        peak = float(c["peak"])
+        start = max(0.0, peak - pre_sec)
+        end = peak + post_sec
+        
+        if not merged_clips:
+            merged_clips.append({"start": start, "end": end, "cands": [c]})
+        else:
+            prev = merged_clips[-1]
+            if start < prev["end"]:
+                prev["end"] = max(prev["end"], end)
+                prev["cands"].append(c)
+            else:
+                merged_clips.append({"start": start, "end": end, "cands": [c]})
+                
+    cand_timestamps = {}
+    cumulative_time = 0.0
+    for clip in merged_clips:
+        clip_start = clip["start"]
+        for c in clip["cands"]:
+            peak = float(c["peak"])
+            # 각 candidate 구간의 시작 지점(peak - pre_sec)을 마커로 사용한다. (음수 방지 클램핑)
+            cand_start = max(0.0, peak - pre_sec)
+            relative_start = cand_start - clip_start
+            cand_timestamps[id(c)] = cumulative_time + relative_start
+            
+        clip_duration = clip["end"] - clip["start"]
+        cumulative_time += clip_duration
+        
+    return merged_clips, cand_timestamps
+
+
 def build_output(video, segments, out_path, workdir, title=None,
                  preset=None, crf=None, copy_mode=False, max_height=None,
                  on_progress=None, should_cancel=None, pre_sec=None, post_sec=None):
@@ -482,11 +539,14 @@ def build_output(video, segments, out_path, workdir, title=None,
 
     _pre  = PRE_SEC  if pre_sec  is None else pre_sec
     _post = POST_SEC if post_sec is None else post_sec
-    total = len(segments)
 
-    def _encode_clip(i, seg):
-        start = max(0.0, seg["peak"] - _pre)
-        dur = _pre + _post
+    # 겹치는 구간 병합
+    merged_clips, _ = get_merged_timeline(segments, _pre, _post)
+    total = len(merged_clips)
+
+    def _encode_clip(i, clip_info):
+        start = clip_info["start"]
+        dur = clip_info["end"] - clip_info["start"]
         clip = workdir / f"clip{i:03d}.mp4"
         cmd = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", video,
                "-t", f"{dur:.2f}"]
@@ -511,8 +571,8 @@ def build_output(video, segments, out_path, workdir, title=None,
     cancelled = False
     workers = max(1, min(BUILD_CLIP_WORKERS, total or 1))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_encode_clip, i, seg): i
-                   for i, seg in enumerate(segments)}
+        futures = {executor.submit(_encode_clip, i, clip_info): i
+                   for i, clip_info in enumerate(merged_clips)}
         for future in as_completed(futures):
             i = futures[future]
             clip_paths[i] = future.result()

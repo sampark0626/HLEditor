@@ -32,7 +32,8 @@ def _fake_run_factory(delay_by_clip=None):
 
 @pytest.fixture
 def segments():
-    return [{"peak": float(10 * i)} for i in range(6)]
+    # pre_sec=8, post_sec=5 (총 13초)이므로 20초 간격으로 두면 겹치지 않아 개별 클립이 생성됩니다.
+    return [{"peak": float(20 * i)} for i in range(6)]
 
 
 def test_clips_created_in_filename_order_regardless_of_completion_order(
@@ -92,3 +93,36 @@ def test_single_segment_still_works(tmp_path, monkeypatch):
     sh.build_output("fake_video.mp4", [{"peak": 5.0}], str(out_path), tmp_path, copy_mode=True)
     listfile = (tmp_path / "concat.txt").read_text(encoding="utf-8")
     assert "clip000.mp4" in listfile
+
+
+def test_overlapping_segments_merged(tmp_path, monkeypatch):
+    # 두 구간이 겹치도록 설정 (peak 10s, 14s. pre_sec=8, post_sec=5)
+    # 구간 A: 2s ~ 15s
+    # 구간 B: 6s ~ 19s
+    # 병합 구간: 2s ~ 19s (총 17초짜리 1개 클립이 생성되어야 함)
+    monkeypatch.setattr(sh, "run", _fake_run_factory())
+    segments = [{"peak": 10.0}, {"peak": 14.0}]
+    out_path = tmp_path / "out.mp4"
+    
+    # timeline 도출 함수 자체 검증
+    merged_clips, cand_timestamps = sh.get_merged_timeline(segments, 8.0, 5.0)
+    assert len(merged_clips) == 1
+    assert merged_clips[0]["start"] == 2.0
+    assert merged_clips[0]["end"] == 19.0
+    
+    # 각 후보의 시작점이 최종 영상 내 어디에 위치하는지 검증
+    # peak 10.0 -> segment start 2.0 -> 상대적 시작 0.0
+    # peak 14.0 -> segment start 6.0 -> 상대적 시작 4.0
+    assert cand_timestamps[id(segments[0])] == 0.0
+    assert cand_timestamps[id(segments[1])] == 4.0
+    
+    # build_output 실행 검증 (1개 클립만 빌드되어야 함)
+    sh.build_output(
+        "fake_video.mp4", segments, str(out_path), tmp_path,
+        copy_mode=True, pre_sec=8.0, post_sec=5.0
+    )
+    
+    listfile = (tmp_path / "concat.txt").read_text(encoding="utf-8")
+    lines = [l for l in listfile.splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert "clip000.mp4" in lines[0]

@@ -112,7 +112,11 @@ def upload_job_to_youtube(jid: str, title: str, privacy: str):
                     except Exception: pass
 
         # 설명 생성
-        desc = yt_up.generate_description(cands, approved, job["video_name"])
+        desc = yt_up.generate_description(
+            cands, approved, job["video_name"],
+            pre_sec=job.get("pre_sec", sh.PRE_SEC),
+            post_sec=job.get("post_sec", sh.POST_SEC)
+        )
 
         def _on_prog(done, total):
             jobs.update(jid, yt_progress={"done": done, "total": total})
