@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 
 import config
+import pan_signal
 import soccer_highlights as sh
 
 log = logging.getLogger("hl")
@@ -248,6 +249,23 @@ def _process(jid):
         log.info("[%s] 검출 직후 취소됨", jid)
         return
 
+    # 팬 궤적 3차 신호 — 실패해도 파이프라인은 계속 (후보 단위 격리와 같은 원칙)
+    if cands:
+        try:
+            series = pan_signal.compute_pan_series(video, wd, run=sh.run)
+            boosted = pan_signal.annotate_candidates(cands, series)
+            update(jid, candidates=cands)
+            log.info("[%s] 팬 궤적 분석: 이동폭 %.0fpx, 지지 후보 %d개%s",
+                     jid, series["range_px"], boosted,
+                     "" if series["reliable"] else " (신뢰도 부족 — 미적용)")
+        except Exception:
+            log.warning("[%s] 팬 궤적 분석 실패 — 신호 없이 진행", jid, exc_info=True)
+
+    if is_cancelled(jid):
+        update(jid, status="error", error="사용자 취소")
+        log.info("[%s] 팬 분석 직후 취소됨", jid)
+        return
+
     key = config.load_gemini_api_key()
     if not key:
         update(jid, status="ready", vision_used=False, finished_at=time.monotonic())
@@ -313,7 +331,7 @@ def start_worker() -> threading.Thread:
 def flag(c, conf_auto, vision_used):
     if not vision_used:
         return "auto"
-    conf = float(c.get("confidence", 0))
+    conf = sh.effective_conf(c)  # 팬 신호 가산치 반영 (승격 전용)
     if c.get("highlight") and conf >= conf_auto:
         return "auto"
     if c.get("highlight") and conf >= sh.CONF_MAYBE:
@@ -362,12 +380,16 @@ def serialize_candidates(cands, conf_auto, vision_used):
     out = []
     for i, c in enumerate(cands):
         conf = float(c.get("confidence", 0))
+        pan = c.get("pan") or {}
         out.append(dict(
             idx=i,
             peak=round(float(c["peak"]), 1),
             delta_db=round(float(c.get("delta_db", 0)), 1),
             type=c.get("type", "-"),
             confidence=round(conf, 2),
+            conf_eff=round(sh.effective_conf(c), 2),
+            pan_bonus=round(float(c.get("pan_bonus") or 0.0), 2),
+            pan_label=pan_signal.STATE_LABELS.get(pan.get("state")) if pan else None,
             reason=c.get("reason", ""),
             highlight=bool(c.get("highlight", False)),
             flag=flag(c, conf_auto, vision_used),

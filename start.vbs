@@ -8,4 +8,6 @@ scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 WshShell.CurrentDirectory = scriptDir
 
 ' python app.py 를 숨김 모드(0)로 실행
-WshShell.Run "python app.py", 0, False
+' 주의: 'python'은 이 PC에서 Microsoft Store 스텁으로 해석되어 실행되지 않으므로
+'       의존성이 설치된 실제 파이썬의 전체 경로를 직접 지정한다.
+WshShell.Run """C:\Users\SKTelecom\AppData\Local\Python\bin\python.exe"" app.py", 0, False

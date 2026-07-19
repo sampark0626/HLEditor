@@ -130,7 +130,9 @@ function renderCands(jid) {
         <button class="ghost sm" style="margin-left:4px" onclick="previewCand('${jid}', ${c.peak})">▶ 미리보기</button>
       </td>
       <td>${c.type}</td>
-      <td>${visionUsed ? c.confidence : "-"}</td>
+      <td style="white-space:nowrap">${visionUsed ? c.confidence + (c.pan_bonus
+        ? ` <span style="color:var(--accent);font-size:11px;cursor:help" title="카메라 팬 신호(${esc(c.pan_label || "")}) 보정: ${c.confidence} → ${c.conf_eff.toFixed(2)}">▲${c.conf_eff.toFixed(2)}</span>`
+        : "") : "-"}</td>
       <td>${tag}</td>
       <td style="color:var(--muted);font-size:12px;max-width:300px;overflow:hidden;
                  text-overflow:ellipsis;white-space:nowrap" title="${esc(c.reason)}">${esc(c.reason)}</td>
@@ -223,8 +225,10 @@ function applyGlobalConf() {
 function recomputeFlags(cands, conf) {
   cands.forEach(c => {
     if (!c.highlight) { c.flag = "reject"; return; }
-    c.flag = c.confidence >= conf ? "auto"
-           : c.confidence >= CONF_MAYBE ? "maybe" : "reject";
+    // 서버와 동일하게 보정 신뢰도(conf_eff = confidence + 팬 가산치)로 판정
+    const eff = c.conf_eff != null ? c.conf_eff : c.confidence;
+    c.flag = eff >= conf ? "auto"
+           : eff >= CONF_MAYBE ? "maybe" : "reject";
   });
 }
 

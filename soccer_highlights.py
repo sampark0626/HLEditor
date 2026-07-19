@@ -35,6 +35,8 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 
+import pan_signal
+
 # Windows cp949 콘솔에서 진행 로그의 이모지(✅⚠️❌)를 print할 때
 # UnicodeEncodeError가 발생해 처리 스레드가 죽는 것을 방지 — stdout/stderr를
 # UTF-8로 재설정한다(모듈 임포트 시 1회, CLI 직접 실행/앱 임포트 양쪽에 적용).
@@ -536,17 +538,24 @@ def build_output(video, segments, out_path, workdir, title=None,
 
 
 # ----------------------------------------------------------------------------
+def effective_conf(c):
+    """팬 신호 가산치를 반영한 보정 신뢰도. 팬 주석이 없으면 원래 confidence 그대로."""
+    conf = float(c.get("confidence", 0))
+    return min(1.0, conf + float(c.get("pan_bonus") or 0.0))
+
+
 def select_segments(cands, conf_auto, use_vision):
     """판별된 후보 리스트에서 채택/확인필요 구간을 분류해 반환.
 
     cands: 각 dict에 최소 'peak'가 있고, 비전 사용 시 'highlight','confidence' 포함.
+    임계 비교는 보정 신뢰도(effective_conf: confidence + pan_bonus)로 한다.
     반환: (selected, maybe)
     """
     if not use_vision:
         return list(cands), []
     selected, maybe = [], []
     for c in cands:
-        conf = float(c.get("confidence", 0))
+        conf = effective_conf(c)
         if c.get("highlight") and conf >= conf_auto:
             selected.append(c)
         elif c.get("highlight") and conf >= CONF_MAYBE:
@@ -581,6 +590,8 @@ def main():
                     help="Gemini API 키 (또는 GEMINI_API_KEY 환경변수)")
     ap.add_argument("--no-vision", action="store_true",
                     help="비전 판별 끄고 오디오 후보만 사용")
+    ap.add_argument("--no-pan", action="store_true",
+                    help="카메라 팬 궤적 3차 신호 끄기 (기본: 켜짐, 로컬 계산·무료)")
     ap.add_argument("--dry-run", action="store_true",
                     help="후보/판별 결과만 출력하고 영상은 안 만듦")
     ap.add_argument("--conf", type=float, default=CONF_AUTO,
@@ -619,11 +630,12 @@ def main():
                   f"(비전 재호출 없음)")
             selected, maybe = select_segments(cands, args.conf, use_vision)
             for c in cands:
-                conf = float(c.get("confidence", 0))
+                conf = effective_conf(c)
                 flag = "✅ 채택" if c in selected else (
                        "⚠️  확인필요" if c in maybe else "❌")
+                boost = f" (팬 +{c['pan_bonus']:.2f})" if c.get("pan_bonus") else ""
                 print(f"        peak@{c['peak']:6.1f}s "
-                      f"[{c.get('type','?'):6}] conf={conf:.2f} {flag}")
+                      f"[{c.get('type','?'):6}] conf={conf:.2f}{boost} {flag}")
             print(f"\n  자동 채택: {len(selected)}개" +
                   (f" / 확인필요: {len(maybe)}개" if use_vision else ""))
 
@@ -657,6 +669,21 @@ def main():
         print(f"      {len(cands)}개 후보:")
         for i, c in enumerate(cands):
             print(f"        #{i+1:2d}  peak@{c['peak']:6.1f}s  +{c['delta_db']:4.1f}dB")
+
+        # 팬 궤적 3차 신호 — 실패해도 파이프라인은 계속 (후보 단위 격리와 같은 원칙)
+        if not args.no_pan and cands:
+            print("[2.5/4] 카메라 팬 궤적 분석 (로컬)...")
+            try:
+                series = pan_signal.compute_pan_series(video, workdir, run=run)
+                boosted = pan_signal.annotate_candidates(cands, series)
+                if not series["reliable"]:
+                    print(f"      팬 이동폭 부족({series['range_px']:.0f}px) 또는 "
+                          f"추정 신뢰도 낮음 — 신호 미적용")
+                else:
+                    print(f"      팬 이동폭 {series['range_px']:.0f}px, "
+                          f"지지 후보 {boosted}개 (신뢰도 +{pan_signal.PAN_BONUS:.2f} 보정)")
+            except Exception as e:
+                print(f"      팬 분석 실패 — 신호 없이 진행: {str(e)[:80]}")
 
         use_vision = not args.no_vision
         client = None
@@ -693,7 +720,10 @@ def main():
         if maybe:
             print("  ⚠️ 확인필요 구간 (필요시 --conf 낮춰서 포함):")
             for c in maybe:
-                print(f"     peak@{c['peak']:.1f}s conf={c.get('confidence',0):.2f} "
+                pan = c.get("pan") or {}
+                pan_txt = (f" [카메라: {pan_signal.STATE_LABELS.get(pan.get('state'), '?')}]"
+                           if pan else "")
+                print(f"     peak@{c['peak']:.1f}s conf={effective_conf(c):.2f}{pan_txt} "
                       f"{c.get('reason','')}")
 
         if args.dry_run:
