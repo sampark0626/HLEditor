@@ -56,13 +56,14 @@ def auth_youtube_callback():
 @bp_auth.route("/api/auth/youtube/status")
 def api_yt_status():
     if not HAS_YT:
-        return jsonify({"ok": False, "reason": "패키지 없음"})
-    authenticated = yt_up.is_authenticated()
-    channel = yt_up.get_channel_info() if authenticated else None
+        return jsonify({"ok": False, "reason": "no_package", "channel": None})
+    st = yt_up.auth_status()
     return jsonify({
-        "ok": authenticated,
+        "ok": st["ok"],
+        "reason": st["reason"],          # ok | no_token | unauthorized | no_channel | network
+        "detail": st.get("detail", ""),
         "has_secrets": yt_up.has_client_secrets(),
-        "channel": channel,
+        "channel": st["channel"],
     })
 
 
@@ -112,6 +113,7 @@ def upload_job_to_youtube(jid: str, title: str, privacy: str):
                     except Exception: pass
 
         # 설명 생성
+        import soccer_highlights as sh
         desc = yt_up.generate_description(
             cands, approved, job["video_name"],
             pre_sec=job.get("pre_sec", sh.PRE_SEC),
@@ -172,22 +174,27 @@ def api_upload_all_youtube():
     if not yt_up.is_authenticated():
         return jsonify({"error": "YouTube 인증 필요"}), 401
 
-    body    = request.json or {}
-    titles  = body.get("titles", {})
-    privacy = config.get_youtube_privacy()
+    body     = request.json or {}
+    titles   = body.get("titles", {})
+    job_ids  = body.get("job_ids")   # None이면 전체 대상 (수동 [전체 업로드] 버튼)
+    privacy  = config.get_youtube_privacy()
+    id_filter = set(job_ids) if job_ids else None
 
     with jobs.JLOCK:
-        to_upload = [
-            {"id": j["id"]} for j in jobs.JOBS.values()
-            if j.get("status") == "done"
+        target = [
+            j for j in jobs.JOBS.values()
+            if (id_filter is None or j["id"] in id_filter)
+            and j.get("status") == "done"
             and j.get("output")
-            and j.get("yt_status") not in ("uploading", "done")
         ]
-    if not to_upload:
-        return jsonify({"error": "업로드할 영상이 없습니다."}), 400
+        # 이미 업로드 중이거나 끝난 잡은 건너뛴다 (build-all의 auto_upload가 먼저
+        # 시작했거나, 파이프라인 [이어서 진행]으로 재호출된 경우).
+        to_upload = [j["id"] for j in target
+                     if j.get("yt_status") not in ("uploading", "done")]
+        already   = [j["id"] for j in target
+                     if j.get("yt_status") in ("uploading", "done")]
 
-    for job in to_upload:
-        jid   = job["id"]
+    for jid in to_upload:
         title = titles.get(jid, "").strip() or config.get_default_title()
         threading.Thread(
             target=upload_job_to_youtube,
@@ -195,4 +202,7 @@ def api_upload_all_youtube():
             daemon=True,
         ).start()
 
-    return jsonify({"ok": True, "n": len(to_upload)})
+    # 대상이 0건이어도 오류가 아니다. 이미 업로드가 진행/완료된 정상 상태일 수 있으므로
+    # 200으로 응답해야 원스톱 파이프라인이 중단되지 않는다.
+    log.info("업로드 요청: 신규 %d개, 이미 진행/완료 %d개", len(to_upload), len(already))
+    return jsonify({"ok": True, "n": len(to_upload), "already": len(already)})

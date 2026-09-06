@@ -48,5 +48,6 @@ refreshAuthIndicators();   // 큐 탭 진입 시 인증 상태 확인
 initNotif();
 setInterval(poll, 2000);
 // 페이지 로드 시 저장된 파이프라인 상태 복원
-if (_pipe) { _pipeBtns(true); renderPipeBar(); }
+// (멈춤 상태로 복원됐다면 버튼을 잠그지 않는다 — 다른 작업을 하거나 재개할 수 있어야 한다)
+if (_pipe) { _pipeBtns(_pipe.status !== "failed"); renderPipeBar(); }
 poll();

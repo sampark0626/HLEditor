@@ -12,6 +12,7 @@ const DEFAULT_TITLE  = window.HL_CONFIG.DEFAULT_TITLE;
 // ─── 전역 상태 ──────────────────────────────────────────
 let allJobs    = [];
 let jobCands   = {};     // jid → {cands, visionUsed}
+let jobSignals = {};     // jid → {times, delta, threshold}
 let localSel   = {};     // jid → Set of indices
 let savedSel   = {};     // jid → array (서버 저장 완료)
 let expanded   = {};     // jid → bool
@@ -41,8 +42,14 @@ let autoUpload   = false;
 let autoUploaded = new Set();   // 자동 업로드 트리거한 jid 추적
 
 // ─── 원스톱 파이프라인 상태 ──────────────────────────────
-// _pipe: null | { mode:"youtube"|"band", jobIds:Set, step:string, stepAt:number }
-// step: "processing" → "building" → "uploading" → "posting" → "done"
+// _pipe: null | {
+//   mode:"youtube"|"band", jobIds:Set, step:string, stepAt:number,
+//   status:"running"|"failed", error:string, canSkip:bool,
+//   opts:{quality, conf},   // 시작 시점 설정 — 재개해도 동일 설정 유지
+//   busy:bool               // 서버 요청 진행 중 (폴링 중복 실행 방지, 영속화 안 함)
+// }
+// step: "processing" → "building" → "uploading" → ("posting"|"band_copy") → "done"
+// status가 "failed"면 파이프라인을 지우지 않고 남겨 두며, 그 단계부터 재개할 수 있다.
 let _pipe = null;
 const PIPE_STEP_DELAY = 3000; // 단계 전환 후 안정화 대기 (ms)
 
@@ -55,7 +62,12 @@ function persistBuildData() { LS.set("buildData", buildData); }
 
 function _savePipe() {
   if (!_pipe) { LS.set("pipe", null); return; }
-  LS.set("pipe", { mode: _pipe.mode, jobIds: [..._pipe.jobIds], step: _pipe.step, stepAt: _pipe.stepAt });
+  LS.set("pipe", {
+    mode: _pipe.mode, jobIds: [..._pipe.jobIds],
+    step: _pipe.step, stepAt: _pipe.stepAt,
+    status: _pipe.status || "running", error: _pipe.error || "",
+    canSkip: !!_pipe.canSkip, opts: _pipe.opts || {},
+  });
 }
 
 function restoreState() {
@@ -67,7 +79,16 @@ function restoreState() {
   autoUpload = false;
   const saved = LS.get("pipe", null);
   if (saved && saved.jobIds?.length && saved.step && saved.step !== "done") {
-    _pipe = { mode: saved.mode, jobIds: new Set(saved.jobIds), step: saved.step, stepAt: saved.stepAt || Date.now() };
+    _pipe = {
+      mode: saved.mode, jobIds: new Set(saved.jobIds),
+      step: saved.step, stepAt: saved.stepAt || Date.now(),
+      // 진행 중이던 단계는 새로고침 후에도 그대로 이어서 감시한다(서버 작업은
+      // 계속 돌고 있으므로). 멈춤 상태였다면 멈춤 그대로 복원해 [이어서 진행]을
+      // 누를 수 있게 한다.
+      status: saved.status === "failed" ? "failed" : "running",
+      error: saved.error || "",
+      canSkip: !!saved.canSkip, opts: saved.opts || {}, busy: false,
+    };
   }
 }
 

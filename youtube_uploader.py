@@ -7,10 +7,14 @@ youtube_uploader.py — 축구 하이라이트 YouTube 업로드 모듈
 """
 
 import json
+import logging
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import config
+
+log = logging.getLogger("hl")
 
 # ─── 경로 및 상수 ─────────────────────────────────────────────────────────────
 _BASE = Path(__file__).parent
@@ -21,6 +25,20 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube",          # 썸네일 업로드 포함
 ]
+
+# 액세스 토큰 만료 이 시간 전이면 미리 갱신한다 (업로드 도중 만료 방지)
+_REFRESH_MARGIN_SEC = 300
+
+# 토큰이 실제로 무효화됐음을 뜻하는 OAuth 오류 코드.
+# 이 경우에만 토큰을 폐기한다 — 네트워크 순단이나 구글 5xx까지 폐기 대상으로 삼으면
+# 일시적 장애 한 번에 refresh token이 지워져 매번 재인증해야 한다.
+_HARD_AUTH_HINTS = (
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid_token",
+    "token has been expired or revoked",
+)
 
 
 # ─── 내부 헬퍼 ────────────────────────────────────────────────────────────────
@@ -48,6 +66,7 @@ def _get_flow(redirect_uri: str):
 
 
 def _save_token(creds) -> None:
+    expiry = getattr(creds, "expiry", None)
     TOKEN_FILE.write_text(json.dumps({
         "token":         creds.token,
         "refresh_token": creds.refresh_token,
@@ -55,7 +74,64 @@ def _save_token(creds) -> None:
         "client_id":     creds.client_id,
         "client_secret": creds.client_secret,
         "scopes":        list(creds.scopes or SCOPES),
+        # expiry를 저장해야 다음 로드 때 creds.expired가 제대로 계산된다.
+        # 저장하지 않으면 만료 여부를 알 수 없어(expiry=None → expired=False)
+        # 이미 죽은 액세스 토큰으로 업로드를 시작하게 된다.
+        "expiry":        expiry.isoformat() if isinstance(expiry, datetime) else None,
     }), encoding="utf-8")
+
+
+def _parse_expiry(raw):
+    """저장된 expiry 문자열 → naive UTC datetime (google-auth가 쓰는 형식)."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    return dt
+
+
+def _is_hard_auth_error(exc) -> bool:
+    """토큰 폐기가 필요한 인증 오류인지 판별한다.
+
+    네트워크 순단·DNS 실패·구글 5xx·할당량 초과(403)는 토큰과 무관하므로 False.
+    """
+    try:
+        from googleapiclient.errors import HttpError  # type: ignore
+        resp = getattr(exc, "resp", None)
+        if isinstance(exc, HttpError) and resp is not None:
+            return getattr(resp, "status", None) == 401
+    except Exception:
+        pass
+    try:
+        from google.auth.exceptions import RefreshError  # type: ignore
+        if isinstance(exc, RefreshError):
+            return any(h in str(exc).lower() for h in _HARD_AUTH_HINTS)
+    except Exception:
+        pass
+    return False
+
+
+def _utcnow_naive() -> datetime:
+    """google-auth의 creds.expiry는 naive UTC이므로 비교 대상도 naive로 맞춘다."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _needs_refresh(creds) -> bool:
+    if getattr(creds, "expired", False):
+        return True
+    expiry = getattr(creds, "expiry", None)
+    if expiry is None:
+        # expiry를 모르는 토큰(= 이 필드를 저장하지 않던 예전 버전이 만든 파일).
+        # 만료 여부를 판단할 수 없으므로 한 번 갱신해 expiry를 채워 넣는다.
+        # 이후로는 저장된 expiry로 정상 판단되므로 매번 갱신하지 않는다.
+        return True
+    if not isinstance(expiry, datetime):
+        return False
+    return expiry <= _utcnow_naive() + timedelta(seconds=_REFRESH_MARGIN_SEC)
 
 
 def _get_credentials():
@@ -71,10 +147,19 @@ def _get_credentials():
         client_id=data.get("client_id"),
         client_secret=data.get("client_secret"),
         scopes=data.get("scopes", SCOPES),
+        expiry=_parse_expiry(data.get("expiry")),
     )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save_token(creds)
+    if creds.refresh_token and _needs_refresh(creds):
+        try:
+            creds.refresh(Request())
+            _save_token(creds)
+        except Exception as e:
+            if _is_hard_auth_error(e):
+                log.warning("YouTube refresh token 무효 — 토큰 폐기: %s", e)
+                revoke()
+                return None
+            # 일시적 장애: 토큰을 유지하고 기존 액세스 토큰으로 그대로 시도한다.
+            log.warning("YouTube 토큰 갱신 일시 실패 (토큰 유지): %s", e)
     return creds
 
 
@@ -105,36 +190,52 @@ def exchange_code(code: str, redirect_uri: str, state: str = "") -> None:
     _save_token(flow.credentials)
 
 
-def is_authenticated() -> bool:
-    """현재 유효한 인증 토큰이 있는지 확인하고, 실제 API 호출을 통해 검증한다."""
+def auth_status() -> dict:
+    """인증 상태를 사유와 함께 반환한다.
+
+    reason: "ok" | "no_token" | "unauthorized" | "no_channel" | "network"
+
+    중요: 네트워크 오류(reason="network")일 때는 ok=True로 두고 토큰도 보존한다.
+    여기서 미인증으로 단정하면 (1) 토큰이 지워져 재인증을 강요당하고
+    (2) 원스톱 파이프라인이 업로드 단계를 조용히 건너뛴다.
+    실제로 인증이 죽었는지는 업로드 시도가 판정하게 둔다.
+    """
     if not TOKEN_FILE.exists():
-        return False
-    try:
-        channel = get_channel_info()
-        if not channel:
-            revoke()
-            return False
-        return True
-    except Exception:
-        revoke()
-        return False
-
-
-def get_channel_info() -> dict | None:
-    """인증된 YouTube 채널 정보 반환 (id, title)."""
+        return {"ok": False, "reason": "no_token", "channel": None, "detail": ""}
     try:
         from googleapiclient.discovery import build  # type: ignore
         creds = _get_credentials()
         if not creds:
-            return None
+            return {"ok": False, "reason": "unauthorized", "channel": None,
+                    "detail": "refresh token이 만료되었거나 취소되었습니다."}
         yt = build("youtube", "v3", credentials=creds)
         resp = yt.channels().list(part="snippet", mine=True).execute()
         items = resp.get("items", [])
         if not items:
-            return None
-        return {"id": items[0]["id"], "title": items[0]["snippet"]["title"]}
-    except Exception:
-        return None
+            return {"ok": False, "reason": "no_channel", "channel": None,
+                    "detail": "이 계정에 연결된 YouTube 채널이 없습니다."}
+        return {
+            "ok": True, "reason": "ok", "detail": "",
+            "channel": {"id": items[0]["id"], "title": items[0]["snippet"]["title"]},
+        }
+    except Exception as e:
+        if _is_hard_auth_error(e):
+            log.warning("YouTube 인증 무효 — 토큰 폐기: %s", e)
+            revoke()
+            return {"ok": False, "reason": "unauthorized", "channel": None,
+                    "detail": str(e)[:200]}
+        log.warning("YouTube 인증 확인 중 일시적 오류 (토큰 유지): %s", e)
+        return {"ok": True, "reason": "network", "channel": None, "detail": str(e)[:200]}
+
+
+def is_authenticated() -> bool:
+    """현재 유효한 인증 토큰이 있는지 확인하고, 실제 API 호출을 통해 검증한다."""
+    return bool(auth_status()["ok"])
+
+
+def get_channel_info() -> dict | None:
+    """인증된 YouTube 채널 정보 반환 (id, title). 실패 시 None (토큰은 건드리지 않음)."""
+    return auth_status()["channel"]
 
 
 def revoke() -> None:
@@ -269,14 +370,24 @@ def upload_video(
 
     req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
 
+    from google.auth.exceptions import RefreshError  # type: ignore
     response = None
-    while response is None:
-        status, response = req.next_chunk()
-        if status and on_progress:
-            try:
-                on_progress(int(status.resumable_progress), file_size)
-            except Exception:
-                pass
+    try:
+        while response is None:
+            status, response = req.next_chunk()
+            if status and on_progress:
+                try:
+                    on_progress(int(status.resumable_progress), file_size)
+                except Exception:
+                    pass
+    except RefreshError as e:
+        # 진짜 만료/취소일 때만 토큰을 폐기한다. 일시적 갱신 실패는 그대로 전파해
+        # 재시도(파이프라인 [이어서 진행])로 복구할 수 있게 남겨둔다.
+        if _is_hard_auth_error(e):
+            revoke()
+            raise RuntimeError(
+                "YouTube 인증이 만료되었거나 취소되었습니다. 다시 로그인해주세요.") from e
+        raise RuntimeError(f"YouTube 토큰 갱신 실패 (일시적 오류일 수 있음): {e}") from e
 
     video_id = response["id"]
     yt_url = f"https://youtu.be/{video_id}"

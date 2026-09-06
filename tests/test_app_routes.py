@@ -142,3 +142,41 @@ def test_cancel_requires_active_status(client):
     jid = jobs.new_job("C:/fake/video4.mp4")  # status="pending"
     r = client.post(f"/api/jobs/{jid}/cancel", json={})
     assert r.status_code == 400
+def test_api_job_audio_signal(client, monkeypatch):
+    jid = jobs.new_job("C:/fake/video.mp4")
+    jobs.JOBS[jid]["workdir"] = "C:/fake/workdir"
+    
+    dummy_signal = {"times": [0.0, 1.0], "delta": [1.2, 3.4], "threshold": 8.0}
+    
+    # Mock sh.get_audio_signal
+    monkeypatch.setattr(sh, "get_audio_signal", lambda video, workdir, sensitivity: dummy_signal)
+    
+    r = client.get(f"/api/jobs/{jid}/audio-signal")
+    assert r.status_code == 200
+    assert r.get_json() == dummy_signal
+    
+    # Verify cached in memory
+    assert jobs.JOBS[jid]["audio_signal"] == dummy_signal
+
+
+def test_api_job_add_manual_candidate(client):
+    jid = jobs.new_job("C:/fake/video.mp4")
+    # Set to ready
+    jobs.JOBS[jid]["status"] = "ready"
+    jobs.JOBS[jid]["approved"] = [0]
+    jobs.JOBS[jid]["candidates"] = [
+        {"peak": 10.0, "delta_db": 12.0, "highlight": True, "type": "goal"}
+    ]
+    
+    r = client.post(f"/api/jobs/{jid}/candidates/add-manual", json={"peak": 30.0})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["idx"] == 1
+    assert body["candidate"]["peak"] == 30.0
+    assert body["candidate"]["type"] == "manual"
+    
+    # Assert added in JOBS
+    assert len(jobs.JOBS[jid]["candidates"]) == 2
+    assert jobs.JOBS[jid]["candidates"][1]["peak"] == 30.0
+    assert jobs.JOBS[jid]["approved"] == [0, 1]

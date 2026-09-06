@@ -88,6 +88,9 @@ def api_post_band():
     if not band_key:
         return jsonify({"error": "밴드를 선택하거나 BAND_TARGET_KEY를 .env에 설정하세요."}), 400
 
+    job_ids   = body.get("job_ids")   # None이면 전체 대상
+    id_filter = set(job_ids) if job_ids else None
+
     # 업로드 완료된 잡들을 날짜별 그룹핑
     with jobs.JLOCK:
         uploaded = [
@@ -98,11 +101,14 @@ def api_post_band():
                 "match_date": j.get("match_date", date.today().isoformat()),
             }
             for j in jobs.JOBS.values()
-            if j.get("yt_url") and j.get("yt_status") == "done"
+            if (id_filter is None or j["id"] in id_filter)
+            and j.get("yt_url") and j.get("yt_status") == "done"
             and j.get("band_status") not in ("posting", "done")
         ]
     if not uploaded:
-        return jsonify({"error": "BAND에 게시할 YouTube 링크가 없습니다."}), 400
+        # 이미 전부 게시된 상태일 수 있으므로 오류가 아니다 (재개 시 정상 경로).
+        return jsonify({"posted": [], "errors": [], "n": 0,
+                        "note": "BAND에 게시할 새 YouTube 링크가 없습니다."})
 
     groups = bp.group_by_date(uploaded)
     url_to_id = {u["yt_url"]: u["id"] for u in uploaded if u["yt_url"]}
@@ -124,4 +130,5 @@ def api_post_band():
             errors.append({"date": match_date, "error": str(e)[:200]})
             log.exception("BAND 게시 실패: %s", match_date)
 
-    return jsonify({"posted": results, "errors": errors})
+    return jsonify({"posted": results, "errors": errors,
+                    "n": sum(r["n"] for r in results)})

@@ -139,3 +139,64 @@ class TestDeleteResultsFile:
     def test_missing_file_is_noop(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "RESULTS_DIR", tmp_path)
         jobs.delete_results_file("does-not-exist")  # 예외 없이 통과해야 함
+class TestStatePersistence:
+    def test_save_and_restore_state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "RESULTS_DIR", tmp_path)
+        
+        # 1. new_job triggers save_job_state
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        jid = jobs.new_job(str(video), sensitivity="strict", workers=3)
+        try:
+            state_file = tmp_path / f"state_{jid}.json"
+            assert state_file.exists()
+            
+            # 2. update triggers save_job_state
+            jobs.update(jid, status="classifying", duration=120.0)
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            assert data["status"] == "classifying"
+            assert data["duration"] == 120.0
+            
+            # 3. progress update does NOT trigger save_job_state
+            # Let's verify by checking mtime
+            mtime_before = state_file.stat().st_mtime
+            time.sleep(0.01)
+            jobs.update(jid, progress={"stage": "classify", "done": 1, "total": 10})
+            mtime_after = state_file.stat().st_mtime
+            assert mtime_before == mtime_after  # should be same (no write)
+            
+            # 4. restore active job as error
+            # Clear memory state first
+            jobs.JOBS.clear()
+            n = jobs.restore_recent_results(max_age_hours=24)
+            assert n == 1
+            assert jid in jobs.JOBS
+            restored_job = jobs.JOBS[jid]
+            assert restored_job["status"] == "error"
+            assert "강제 종료" in restored_job["error"]
+            
+            # 5. delete_state_file cleans up file
+            jobs.delete_state_file(jid)
+            assert not state_file.exists()
+        finally:
+            jobs.JOBS.pop(jid, None)
+
+    def test_restore_done_job_preserves_status_and_outputs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "RESULTS_DIR", tmp_path)
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        
+        jid = jobs.new_job(str(video))
+        try:
+            state_file = tmp_path / f"state_{jid}.json"
+            jobs.update(jid, status="done", output="highlights_video.mp4", approved=[1, 2])
+            
+            jobs.JOBS.clear()
+            n = jobs.restore_recent_results(max_age_hours=24)
+            assert n == 1
+            restored_job = jobs.JOBS[jid]
+            assert restored_job["status"] == "done"
+            assert restored_job["output"] == "highlights_video.mp4"
+            assert restored_job["approved"] == [1, 2]
+        finally:
+            jobs.JOBS.pop(jid, None)

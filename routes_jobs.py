@@ -114,12 +114,20 @@ def api_job_approve(jid):
 
 @bp_jobs.route("/api/jobs/approve-all", methods=["POST"])
 def api_jobs_approve_all():
-    """모든 ready/done 잡에 AI 기본값(conf 기준 auto 플래그) 일괄 적용."""
+    """ready/done 잡에 AI 기본값(conf 기준 auto 플래그) 일괄 적용.
+
+    job_ids가 오면 그 잡만 대상으로 한다 — 원스톱 파이프라인이 큐에 남아 있던
+    예전 잡까지 건드리지 않게 하기 위함.
+    """
     body = request.json or {}
     conf = float(body.get("conf", sh.CONF_AUTO))
+    job_ids = body.get("job_ids")
+    id_filter = set(job_ids) if job_ids else None
     saved = []
     with jobs.JLOCK:
         for jid, job in jobs.JOBS.items():
+            if id_filter is not None and jid not in id_filter:
+                continue
             if job["status"] not in ("ready", "done"):
                 continue
             cands = job["candidates"]
@@ -132,6 +140,31 @@ def api_jobs_approve_all():
     return jsonify({"saved": saved, "total": len(saved)})
 
 
+def _try_auto_upload(jid: str, title: str, privacy: str) -> bool:
+    """빌드 직후 자동 업로드를 시도한다.
+
+    인증이 없어 건너뛰는 경우 반드시 흔적을 남긴다 — 예전엔 조용히 넘어가서
+    "업로드가 안 됐는데 이유도 안 나온다"는 상황이 생겼다.
+    """
+    if not routes_auth.HAS_YT:
+        jobs.update(jid, yt_status="error",
+                    yt_error="YouTube 패키지가 설치되지 않아 업로드를 건너뛰었습니다.")
+        log.warning("[%s] 자동 업로드 건너뜀 — google-api-python-client 미설치", jid)
+        return False
+    if not routes_auth.yt_up.is_authenticated():
+        jobs.update(jid, yt_status="error",
+                    yt_error="YouTube 인증이 없어 업로드를 건너뛰었습니다. 인증 후 [이어서 진행]을 누르세요.")
+        log.warning("[%s] 자동 업로드 건너뜀 — YouTube 미인증", jid)
+        return False
+    threading.Thread(
+        target=routes_auth.upload_job_to_youtube,
+        args=(jid, title or config.get_default_title(), privacy),
+        daemon=True,
+    ).start()
+    log.info("[%s] 빌드 완료 → 업로드 즉시 시작", jid)
+    return True
+
+
 @bp_jobs.route("/api/jobs/build-all", methods=["POST"])
 def api_jobs_build_all():
     body = request.json or {}
@@ -140,23 +173,40 @@ def api_jobs_build_all():
     yt_titles   = body.get("yt_titles", {})   # YouTube 업로드용 전체 제목 (auto_upload 시)
     outputs     = body.get("outputs", {})
     auto_upload = bool(body.get("auto_upload", False))  # 빌드 직후 자동 업로드
+    job_ids     = body.get("job_ids")                   # None이면 전체 대상
+    # 이미 생성된 영상은 다시 만들지 않는다 — 파이프라인 [이어서 진행]이
+    # 성공한 빌드를 처음부터 재실행하지 않게 하는 스위치.
+    skip_built  = bool(body.get("skip_built", False))
     qk = sh.QUALITY_PRESETS.get(quality, sh.QUALITY_PRESETS["balanced"])
     privacy = config.get_youtube_privacy()
+    id_filter = set(job_ids) if job_ids else None
+
+    def _in_scope(jid, job):
+        return ((id_filter is None or jid in id_filter)
+                and job["status"] in ("ready", "done")
+                and job["approved"] is not None)
 
     with jobs.JLOCK:
-        to_build = [
-            jid for jid, job in jobs.JOBS.items()
-            if job["status"] in ("ready", "done")
-            and job["approved"] is not None
-            and len(job["approved"]) > 0
-        ]
+        to_build, already_built = [], []
+        for jid, job in jobs.JOBS.items():
+            if not _in_scope(jid, job) or len(job["approved"]) == 0:
+                continue
+            if (skip_built and job["status"] == "done" and job.get("output")
+                    and os.path.exists(job["output"])):
+                already_built.append(jid)
+                continue
+            to_build.append(jid)
         skipped = [
-            job["video_name"] for job in jobs.JOBS.values()
-            if job["status"] in ("ready", "done")
-            and job["approved"] is not None
-            and len(job["approved"]) == 0
+            job["video_name"] for jid, job in jobs.JOBS.items()
+            if _in_scope(jid, job) and len(job["approved"]) == 0
         ]
+    if already_built:
+        log.info("빌드 건너뜀 (이미 생성됨): %d개", len(already_built))
     if not to_build:
+        # 이미 전부 생성돼 있으면 오류가 아니다 — 재개 시 정상 경로.
+        if already_built:
+            return jsonify({"ok": True, "n": 0, "already_built": len(already_built),
+                            "skipped": skipped})
         return jsonify({"error": "승인된 구간이 있는 잡이 없습니다.", "skipped": skipped}), 400
 
     def _run():
@@ -195,14 +245,8 @@ def api_jobs_build_all():
                     log.info("[%s] 빌드 완료: %s", jid, out_path)
 
                     # 빌드 완료 즉시 업로드 시작 — 다음 잡 빌드와 병렬 처리
-                    if auto_upload and routes_auth.HAS_YT and routes_auth.yt_up.is_authenticated():
-                        yt_title = (yt_titles.get(jid) or title or config.get_default_title())
-                        threading.Thread(
-                            target=routes_auth.upload_job_to_youtube,
-                            args=(jid, yt_title, privacy),
-                            daemon=True,
-                        ).start()
-                        log.info("[%s] 빌드 완료 → 업로드 즉시 시작", jid)
+                    if auto_upload:
+                        _try_auto_upload(jid, yt_titles.get(jid) or title, privacy)
 
                 except Exception as e:
                     jobs.update(jid, status="error", error=str(e)[:300])
@@ -212,7 +256,8 @@ def api_jobs_build_all():
                     jobs.finalize_pending_delete(jid)
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"ok": True, "n": len(to_build), "skipped": skipped})
+    return jsonify({"ok": True, "n": len(to_build),
+                    "already_built": len(already_built), "skipped": skipped})
 
 
 @bp_jobs.route("/api/jobs/<jid>/output")
@@ -234,14 +279,45 @@ def api_job_source(jid):
 
 @bp_jobs.route("/api/jobs/<jid>/thumb/<int:idx>")
 def api_job_thumb(jid, idx):
-    """후보 구간 대표 프레임 썸네일. 비전 판별용으로 추출된 프레임을 재사용한다."""
+    """후보 구간 대표 프레임 썸네일. 비전 판별용으로 추출된 프레임을 재사용하되,
+    서버 재시작 등으로 임시 디렉토리가 지워진 경우 온디맨드로 대표 프레임을 추출한다."""
     job = jobs.JOBS.get(jid)
     workdir = job.get("workdir") if job else None
-    if not workdir or not os.path.isdir(workdir):
+    if not workdir:
         return "no thumbnail", 404
+
+    # 임시 디렉토리 생성 보장 (재시작 시 정리되었을 수 있음)
+    Path(workdir).mkdir(parents=True, exist_ok=True)
+
     frames = sorted(Path(workdir).glob(f"cand{idx}_*.jpg"))
     if not frames:
-        return "no thumbnail", 404
+        try:
+            # candidates 범위 체크
+            cands = job.get("candidates") or []
+            if idx >= len(cands):
+                return "no thumbnail", 404
+            cand = cands[idx]
+            peak = float(cand["peak"])
+
+            # 앞뒤 길이 설정
+            pre_sec = job.get("pre_sec", sh.PRE_SEC)
+            post_sec = job.get("post_sec", sh.POST_SEC)
+            seg_start = max(0.0, peak - pre_sec)
+            seg_len = pre_sec + post_sec
+            thumb_ts = seg_start + (seg_len / 2.0)
+
+            thumb_path = Path(workdir) / f"cand{idx}_000.jpg"
+            cmd_thumb = [
+                "ffmpeg", "-y", "-ss", f"{thumb_ts:.2f}", "-i", job["video"],
+                "-vframes", "1", "-vf", "scale=640:-1",
+                str(thumb_path), "-loglevel", "error"
+            ]
+            sh.run(cmd_thumb)
+            frames = [thumb_path]
+        except Exception:
+            log.exception("[%s] 온디맨드 썸네일 추출 실패", jid)
+            return "no thumbnail", 404
+
     pick = frames[len(frames) // 2]  # 구간 중간 프레임을 대표 이미지로 사용
     return send_file(pick, mimetype="image/jpeg")
 
@@ -258,11 +334,13 @@ def api_job_delete(jid):
             job["cancel_requested"] = True
             job["pending_delete"] = True
             log.info("[%s] 처리 중 삭제 요청 — 취소 후 정리 예정", jid)
+            jobs.delete_state_file(jid)
             return jsonify({"ok": True, "deferred": True})
         job = jobs.JOBS.pop(jid, None)
     if job and job.get("workdir") and os.path.exists(job["workdir"]):
         shutil.rmtree(job["workdir"], ignore_errors=True)
     jobs.delete_results_file(jid)
+    jobs.delete_state_file(jid)
     log.info("잡 삭제: %s", jid)
     return jsonify({"ok": True})
 
@@ -282,16 +360,36 @@ def api_job_cancel(jid):
 
 @bp_jobs.route("/api/jobs/<jid>/retry", methods=["POST"])
 def api_job_retry(jid):
-    """오류 상태인 잡을 같은 설정으로 다시 큐에 넣어 재처리."""
+    """오류 상태인 잡을 같은 설정으로 다시 큐에 넣어 재처리.
+
+    stage="build"면 분석 결과(후보·승인)를 그대로 두고 "ready"로만 되돌린다 —
+    인코딩 단계에서만 실패한 잡을 몇 분짜리 재분석 없이 다시 만들기 위함.
+    """
     job = jobs.JOBS.get(jid)
     if not job:
         return jsonify({"error": "잡 없음"}), 404
     if job["status"] != "error":
         return jsonify({"error": "오류 상태인 잡만 재시도할 수 있습니다."}), 400
+
+    stage = (request.json or {}).get("stage", "")
+    if stage == "build":
+        if not job.get("candidates"):
+            return jsonify({"error": "분석 결과가 없어 빌드만 재시도할 수 없습니다."}), 400
+        jobs.update(jid, status="ready", error=None, output=None,
+                    progress=dict(stage=None, done=0, total=0),
+                    yt_status=None, yt_url=None, yt_error=None,
+                    cancel_requested=False, pending_delete=False)
+        log.info("[%s] 빌드 단계만 재시도 — 분석 결과 유지 (후보 %d개)", jid, len(job["candidates"]))
+        return jsonify({"ok": True, "stage": "build"})
+
     if job.get("workdir") and os.path.exists(job["workdir"]):
         shutil.rmtree(job["workdir"], ignore_errors=True)
+    
+    # 기존 candidates가 있으면 유지한다 (분류 재시도 시 이미 완료된 비전 캐시 활용을 위함)
+    cands = job.get("candidates") or []
+    
     jobs.update(jid,
-         status="pending", error=None, candidates=[], vision_used=False,
+         status="pending", error=None, candidates=cands,
          usage=None, workdir=None, duration=None, approved=None,
          output=None,
          progress=dict(stage=None, done=0, total=0),
@@ -300,5 +398,71 @@ def api_job_retry(jid):
          band_status=None, band_post_url=None, band_error=None,
          cancel_requested=False, pending_delete=False)
     jobs.JOB_QUEUE.put(jid)
-    log.info("[%s] 재시도 요청 — 큐에 재투입", jid)
+    log.info("[%s] 재시도 요청 — 큐에 재투입 (기존 후보 %d개 유지)", jid, len(cands))
     return jsonify({"ok": True})
+
+
+@bp_jobs.route("/api/jobs/<jid>/audio-signal")
+def api_job_audio_signal(jid):
+    job = jobs.JOBS.get(jid)
+    if not job:
+        return jsonify({"error": "없음"}), 404
+        
+    # 메모리 캐시 확인
+    if "audio_signal" in job:
+        return jsonify(job["audio_signal"])
+        
+    try:
+        workdir = Path(job["workdir"])
+        workdir.mkdir(parents=True, exist_ok=True)
+        
+        signal = sh.get_audio_signal(job["video"], workdir, job.get("sensitivity", "normal"))
+        
+        # 메모리 캐싱
+        job["audio_signal"] = signal
+        return jsonify(signal)
+    except Exception as e:
+        log.exception("[%s] 오디오 시그널 추출 실패", jid)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp_jobs.route("/api/jobs/<jid>/candidates/add-manual", methods=["POST"])
+def api_job_add_manual_cand(jid):
+    job = jobs.JOBS.get(jid)
+    if not job:
+        return jsonify({"error": "없음"}), 404
+    body = request.json or {}
+    peak = float(body.get("peak", 0.0))
+    
+    # 수동 하이라이트 후보 생성
+    new_cand = {
+        "start": max(0.0, peak - job.get("pre_sec", sh.PRE_SEC)),
+        "end": peak + job.get("post_sec", sh.POST_SEC),
+        "peak": peak,
+        "delta_db": 0.0,
+        "highlight": True,
+        "type": "manual",
+        "confidence": 1.0,
+        "reason": "사용자 수동 추가"
+    }
+    
+    with jobs.JLOCK:
+        job["candidates"].append(new_cand)
+        idx = len(job["candidates"]) - 1
+        if job["approved"] is None:
+            conf_auto = sh.CONF_AUTO
+            vu = job["vision_used"]
+            job["approved"] = [i for i, c in enumerate(job["candidates"])
+                               if jobs.flag(c, conf_auto, vu) == "auto"]
+        else:
+            job["approved"].append(idx)
+            
+    # 디스크에 즉시 보존
+    jobs.save_job_state(jid)
+    
+    return jsonify({
+        "ok": True,
+        "idx": idx,
+        "candidate": new_cand,
+        "approved": job["approved"]
+    })

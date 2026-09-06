@@ -50,6 +50,7 @@
 | `PROJECT.md` | 이 문서 (설계 의도·핸드오프용) |
 | `IMPROVEMENT_PLAN.md` | 2026-07 리팩터 계획과 실행 로그 (무엇을 왜 바꿨는지의 상세 기록) |
 | `PRIVACY.md` | BAND API 심사용 개인정보처리방침 |
+| `dotplay/`, `jobs_dotplay.py`, `routes_dotplay.py`, `static/js/dotplay.js` | Dot Play(FM 스타일 2D 버드뷰 변환) 기능 일체 — 자세한 내용은 아래 [Dot Play](#dot-play-fm-스타일-2d-버드뷰-변환--2026-0719-20-통합) 섹션 |
 
 `soccer_highlights.py` 상단의 **조절 파라미터 블록**(`WIN_SEC` ~ `CONF_MAYBE`)이 동작의 거의 전부를 좌우한다. 로직보다 이 값들을 먼저 본다.
 웹 UI로 실행할 때는 `python app.py`가 진입점이며, 아래 CLI 사용법은 `soccer_highlights.py`를 직접 스크립트로 돌릴 때만 해당한다.
@@ -160,6 +161,174 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 
 ---
 
+## 원스톱 파이프라인 계약 (2026-08-01 수정)
+
+원스톱(`static/js/pipeline.js`)은 브라우저가 2초 폴링으로 서버 상태를 보며 단계를
+넘기는 구조다. 각 단계는 **진입 액션(`_enterStep`)** 과 **완료 판정(`advancePipeline`)** 으로
+분리돼 있다.
+
+```
+processing → building → uploading → (posting | band_copy) → done
+```
+
+### 지켜야 할 규칙
+
+1. **"이미 처리됨"은 오류가 아니다.** 파이프라인이 호출하는 서버 API
+   (`approve-all` / `build-all` / `upload-all-youtube` / `post-band`)는 대상이 0건이어도
+   **200**을 반환해야 한다. 프론트의 `post()`는 non-2xx에 예외를 던지고, 그 예외가
+   그대로 단계 중단으로 이어진다.
+   - 실제 사고: `build-all`의 `auto_upload`가 빌드 직후 업로드를 시작해 놓은 상태에서
+     파이프라인이 안전망으로 `upload-all-youtube`를 한 번 더 호출하면 대상이 0건이 되어
+     400이 났고, 원스톱이 업로드 단계에서 매번 죽었다. (업로드 자체는 백그라운드에서
+     성공하지만 BAND 글 준비·완료 알림이 실행되지 않음)
+2. **진입 액션은 멱등해야 한다.** 재개(`resumePipeline`)는 같은 단계의 진입 액션을 다시
+   부르는 것뿐이다. 그래서 서버는 이미 끝난 작업을 건너뛴다 —
+   `build-all`은 `skip_built`, `upload-all-youtube`는 `yt_status in (uploading, done)` 제외.
+3. **파이프라인 잡만 건드린다.** 위 API는 모두 `job_ids`를 받는다. 없으면 전체 대상이
+   되어 큐에 남아 있던 예전 잡까지 승인·빌드·업로드된다(의도치 않은 채널 업로드).
+4. **실패해도 상태를 지우지 않는다.** 실패는 `_pipeFail()`로 `status="failed"`를 남기고
+   진행 바에 [이어서 진행] / [실패 건너뛰고 다음 단계]를 띄운다. 처음부터 다시 하지 않는다.
+   빌드 단계 실패는 `/api/jobs/<id>/retry {"stage":"build"}`로 **분석 결과를 유지한 채**
+   인코딩만 재시도한다(몇 분짜리 Gemini 재판별을 다시 하지 않기 위함).
+
+### YouTube 토큰 취급 (중요)
+
+`youtube_uploader.py`는 **네트워크 오류로 토큰을 지우지 않는다.** `_is_hard_auth_error()`가
+`invalid_grant` 계열과 401만 "진짜 인증 실패"로 보고, DNS 실패·타임아웃·구글 5xx·403(할당량)은
+토큰을 보존한다. 예전에는 `is_authenticated()`가 모든 예외를 인증 실패로 처리해 `revoke()`를
+불렀고, 이 함수는 페이지 로드마다 호출되므로 순간적인 네트워크 장애 한 번에 refresh token이
+지워져 계속 재인증해야 했다.
+
+토큰 파일에는 **`expiry`를 반드시 저장한다.** 저장하지 않으면 `creds.expired`가 항상 False가
+되어 만료된 액세스 토큰으로 업로드를 시작하고, 매 요청이 401 → 재갱신 경로를 타게 된다
+(로그의 `Refreshing credentials due to a 401 response`가 그 증상이다).
+
+> OAuth 동의화면이 **"테스트" 상태면 refresh token이 7일 후 강제 만료**된다. 주기적으로
+> 재인증이 필요하다면 Google Cloud Console에서 앱을 "프로덕션"으로 게시할 것.
+
+---
+
+## Dot Play (FM 스타일 2D 버드뷰 변환) — 2026-07-19/20 통합
+
+Xbotgo(iPhone 16 Pro) 촬영 영상에서 선수·공 위치를 검출해 Football Manager
+스타일 2D 버드뷰 dot-play 영상으로 변환하는 기능. 별도 PoC 저장소
+(`C:\Users\SKTelecom\skt\fm-dotplay`)에서 먼저 검증한 코어를 이 프로젝트로
+이식했다 — 같은 XbotGo 카메라 도메인이고, job 큐/워커 패턴을 그대로 재사용할
+수 있어서다. 원래 fm-dotplay를 독립 프로젝트로 시작했다가 도중에 "HLEditor
+안에 구현했어야 했다"는 판단으로 이쪽으로 옮겼다.
+
+### 파이프라인
+```
+영상 → ① 검출(YOLO, roboflow 호스팅) → ② 추적(ByteTrack)
+     → ③ 팀분류(SigLIP+KMeans) → ④ 피치 캘리브레이션(키포인트→호모그래피, 팬 대응 옵티컬플로우 전파)
+     → ⑤ 좌표 스무딩(속도 이상치 제거+보간+Savitzky-Golay) → ⑥ dot-play 렌더
+```
+
+### 파일
+| 파일 | 설명 |
+|---|---|
+| `dotplay/` | 코어 서브패키지 — `detect`/`track`/`teams`/`homography`/`smoothing`/`render`/`pitch`/`pipeline`/`device`/`roboflow_client`/`selftest`/`config` |
+| `jobs_dotplay.py` | **하이라이트 파이프라인(`jobs.py`)과 완전 분리된** 별도 상태저장소·큐·워커 |
+| `routes_dotplay.py` | API Blueprint (`/api/dotplay/*`) |
+| `static/js/dotplay.js` | Dot Play 탭 UI — 자체 폴링 루프, 하이라이트 쪽 `allJobs`/`poll()`과 무관 |
+| `dotplay_output/` | 산출물(`{jid}.mp4`, `{jid}.parquet`) — gitignore됨 |
+
+### 아키텍처 결정 — 왜 워커를 분리했나
+`jobs.py`의 백그라운드 워커는 큐 하나를 **순차 처리**하는 단일 스레드다.
+dot-play는 CPU 전용 추론이라 5분 영상 기준 수십 분이 걸릴 수 있는데, 같은
+큐에 얹으면 그동안 하이라이트 추출 잡이 전부 대기하게 된다. 그래서
+`jobs_dotplay.py`가 완전히 독립된 `DOTPLAY_QUEUE`/`DOTPLAY_JOBS`/
+`hl-dotplay-worker` 스레드를 쓴다. `app.py`가 두 워커를 모두 기동한다
+(`jobs.start_worker()` + `jobs_dotplay.start_worker()`).
+
+### 무거운 의존성 처리 — 지연 import
+`dotplay/*`의 torch·ultralytics·transformers 등은 **잡이 실제로 실행될 때만**
+import된다(`jobs_dotplay._process()` 내부). `app.py`/`routes_dotplay.py`는
+가벼운 모듈만 최상위에서 import하므로, 이 무거운 패키지들이 없어도 앱 자체는
+정상 기동한다 — 실제로 검증: CV 스택 설치 전 상태에서 서버를 띄워
+`/api/dotplay/status`, `/api/dotplay/jobs`가 정상 응답하는 것을 확인했다.
+
+### 이 환경(Python 3.14) 특유의 문제 두 가지 — 재발 방지
+1. **roboflow의 `inference` 패키지가 Python 3.14 휠을 지원하지 않음**(모든
+   버전이 3.11~3.13 상한). → `dotplay/roboflow_client.py`가 `requests`로
+   REST API(`https://detect.roboflow.com/{model_id}`)를 직접 호출하도록
+   대체. `supervision`의 `Detections.from_inference()` /
+   `KeyPoints.from_inference()`는 원래 이 API가 반환하는 순수 JSON dict를
+   그대로 받아들이도록 설계돼 있어 `inference` 패키지 유무와 무관하게
+   동일하게 동작한다 — 기능 손실 없음.
+2. **pandas 3.0의 Copy-on-Write** 때문에 `.to_numpy()`가 읽기전용 배열을
+   반환할 수 있다. `dotplay/smoothing.py`의 `_smooth_track()`에서
+   `reindex()` 이후 `.to_numpy(dtype=float)`에 반드시 `.copy()`를 붙여야
+   in-place 대입(`x[outliers] = np.nan`)이 에러 없이 동작한다. 새로 numpy
+   배열을 pandas에서 뽑아 mutate하는 코드를 추가할 때 이 패턴을 기본으로
+   가정할 것.
+
+### 설정
+- `.env`의 `ROBOFLOW_API_KEY` 필요 (무료, app.roboflow.com 발급) — 없으면
+  Dot Play 탭에 경고 배너가 뜨고, 잡 실행 시 명확한 오류 메시지로 실패한다
+  (크래시 아님).
+- `DOTPLAY_PLAYER_MODEL_ID` / `DOTPLAY_FIELD_MODEL_ID` — 기본값은 roboflow
+  공개 Universe 모델(`football-players-detection-3zvbc/11`,
+  `football-field-detection-f07vi/14`). 아마추어 구장 라인 인식이 나쁘면
+  이 모델들을 자체 라벨링으로 파인튜닝해 교체하는 것을 고려.
+
+### 검증 상태
+- ✅ UI 탭 렌더링, API 엔드포인트, 서버 재시작 시 기존 하이라이트 잡 무손실
+  복원 — 실제 브라우저로 확인 완료.
+- ✅ self-test(`dotplay.selftest.run_selftest()`, 모델·API 키 불필요) —
+  합성 좌표로 스무딩→렌더 파이프라인이 HLEditor의 Python 3.14 환경에서
+  end-to-end 정상 동작하는 것을 확인(피치 라인·팀 컬러 점·잔상 정상 렌더링).
+- ✅ **실제 클립 변환 검증 완료 (2026-07-20)** — 0719_6경기 원본에서 자른
+  60초 클립(1080p30, stride=2, 900프레임)으로 end-to-end 성공. 결과:
+  - **소요 시간 83분** (분석 68분 + 팀분류 13분 + 스무딩·렌더링 ~2분).
+    병목은 CPU가 아니라 **Roboflow API 왕복(프레임당 2회 순차 호출 ≈ 4초)**.
+    5분 영상이면 stride=2 기준 약 7시간 — 실사용엔 속도 개선 필수(아래).
+  - **1차 시도는 25분 지점에서 ReadTimeout 1회로 전체 실패** →
+    `roboflow_client.py`에 지수 백오프 재시도(타임아웃/연결오류/429/5xx,
+    최대 5회) 추가 후 재실행에서 완주. 이 재시도는 필수다.
+  - **품질(60초 실측)**: 좌표의 77%만 피치 안(+5% 여유), 프레임의 26%에서
+    피치 밖 점 5개 이상(호모그래피 불안정 구간), 극단 이상치(피치 2배 초과,
+    km 단위 폭주)도 165행 존재. 피치 안 기준 프레임당 중앙값 9명만 검출
+    (실제 가시 인원 16~22명) — 먼 사이드 소형 선수 미검출 다수.
+    트랙 파편화 심함(397트랙, 중앙값 15프레임=1초). 팀 분류는 동작하나
+    분포 불균형(5215:3201). 골키퍼 클래스는 한 번도 안 잡힘(전부 player/
+    referee).
+  - 개선 후보(우선순위순): ① 피치 밖 좌표 클램프/드롭(스무딩 전) —
+    호모그래피 폭주 프레임 무력화, ② 선수/피치 검출 2회 호출 병렬화(시간
+    절반), ③ 피치 키포인트 검출을 매 프레임 대신 N프레임마다(옵티컬플로우
+    전파가 이미 있음), ④ 아마추어 구장용 모델 파인튜닝(검출률 근본 개선).
+
+### 하이라이트 PiP 합성 (2026-07-20 추가)
+완료된 하이라이트 잡을 골라, 하이라이트 하단 중앙에 dot-play 버드뷰를 작게
+얹은 합성 영상을 만드는 기능 (`mode="pip"` 잡).
+
+- **편집본을 직접 분석하지 않는다** — 장면 전환마다 추적·옵티컬플로우가
+  깨지므로, `routes_dotplay.api_dotplay_add_pip()`가 하이라이트 빌드와 동일한
+  `sh.get_merged_timeline()`으로 원본 영상의 구간 타임라인을 계산해 잡에
+  스냅샷으로 저장하고, `dotplay/pipeline.py::run_radar_segments()`가 원본의
+  그 구간들만 분석한다(구간마다 추적기·호모그래피 리셋, track_id는 구간별
+  1,000,000 단위 네임스페이스로 분리).
+- **팀 색 일관성**: 팀 분류(SigLIP+KMeans)는 전체 구간의 크롭으로 1회만
+  학습한다. 구간별로 따로 학습하면 구간마다 팀 A/B가 뒤바뀔 수 있다.
+- **싱크**: 좌표 frame을 편집본 타임라인으로 재배치하고, `render_video()`의
+  `frame_range`로 전체 길이를 강제 렌더링해 편집본과 길이를 맞춘다. 합성은
+  ffmpeg overlay(`jobs_dotplay._composite_pip()`, 폭 28%·하단 중앙·불투명도
+  0.9, `eof_action=repeat`). '최고 속도(무재인코딩)'로 빌드된 하이라이트는
+  컷이 키프레임에 스냅돼 어긋날 수 있어, 추가 시점에 ffprobe로 실제 길이와
+  1초 이상 차이나면 잡에 경고(note)를 붙인다.
+- 산출물: `{jid}.mp4`(합성본), `{jid}_radar.mp4`(레이더 단독), `{jid}.parquet`.
+- ❌ 실제 영상으로는 미검증(ROBOFLOW_API_KEY 없음 — 위와 동일 블로커).
+  합성 단계(`_composite_pip`)는 합성 영상으로 단독 검증 완료, 오류 경로는
+  실제 하이라이트 잡으로 E2E 확인 완료.
+
+### 참고
+전체 설계 배경·PoC 로드맵은 별도 저장소
+`C:\Users\SKTelecom\skt\fm-dotplay\PLAN.md`에 남아 있다(이 저장소로 이식되기
+전 원본 설계 문서). 코드는 이제 이 프로젝트가 정본이며, fm-dotplay는 참고용
+으로만 남겨둔다.
+
+---
+
 ## 향후 개선 아이디어 (Claude Code 작업 후보)
 
 우선순위 순:
@@ -206,6 +375,11 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 - `ffmpeg` / `ffprobe` (PATH에 있어야 함)
 - `GEMINI_API_KEY` 환경변수 (비전 사용 시). 없으면 비전 판별 없이 오디오 후보 전체를 채택 취급하고 UI에 배지로 알림
 - 웹 UI 실행 시: `flask`, `google-api-python-client`, `google-auth-oauthlib`, `google-auth-httplib2`, `requests`, `pillow`, `pystray`(트레이 아이콘, 선택)
+- **Dot Play 기능**: `ROBOFLOW_API_KEY` 환경변수 (실제 변환 실행 시). 없으면
+  Dot Play 탭에 경고 배너, 잡은 명확한 오류로 실패(다른 기능엔 영향 없음).
+  torch·ultralytics·transformers 등 무거운 CV 스택이 `requirements.txt`에
+  포함돼 있음(설치 시간 김) — 자세한 내용과 이 PC 특유의 우회 사항(위
+  Python 3.14 관련 주석 두 가지)은 위 [Dot Play](#dot-play-fm-스타일-2d-버드뷰-변환--2026-0719-20-통합) 섹션 참고
 
 ## 테스트·lint
 ```bash

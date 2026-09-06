@@ -20,7 +20,7 @@ async function toggleServerLog() {
 function go(name) {
   activePne = name;
   document.querySelectorAll(".tb").forEach((b, i) => {
-    const on = ["queue","review","build"][i] === name;
+    const on = ["queue","review","build","dotplay"][i] === name;
     b.classList.toggle("on", on);
     b.setAttribute("aria-selected", String(on));
   });
@@ -37,9 +37,15 @@ async function refreshAuthIndicators() {
     const d = await r.json();
     ytAuth = !!d.ok;
     if (ytEl) {
-      ytEl.innerHTML = d.ok
-        ? `<span style="color:var(--green)">✔ YouTube 인증됨${d.channel ? " (" + d.channel.title + ")" : ""}</span>`
-        : `<span style="color:var(--red)">✖ YouTube 미인증</span>&nbsp;<a href="/auth/youtube" style="font-size:12px;color:var(--blue)">인증하기 →</a>`;
+      if (d.ok && d.reason === "network") {
+        // 네트워크 문제로 확인만 실패한 상태 — 토큰은 살아 있으므로 미인증이 아니다.
+        ytEl.innerHTML = `<span style="color:var(--hint)">◐ YouTube 인증 확인 실패 (네트워크) — 저장된 인증으로 진행</span>`;
+      } else if (d.ok) {
+        ytEl.innerHTML = `<span style="color:var(--green)">✔ YouTube 인증됨${d.channel ? " (" + d.channel.title + ")" : ""}</span>`;
+      } else {
+        const why = d.reason === "no_channel" ? " (채널 없음)" : "";
+        ytEl.innerHTML = `<span style="color:var(--red)">✖ YouTube 미인증${why}</span>&nbsp;<a href="/auth/youtube" style="font-size:12px;color:var(--blue)">인증하기 →</a>`;
+      }
     }
   } catch(e) {}
   try {
@@ -216,7 +222,10 @@ function renderQueue() {
     const prog = j.progress || {};
     let progHtml = "";
     if (j.status === "detecting") {
-      progHtml = `<div style="margin-top:4px"><span class="spin"></span><span class="hint">오디오 분석 중…</span></div>`;
+      // 검출 단계는 오디오 분석 → 팬 궤적 분석 두 구간으로 나뉜다.
+      // 팬 구간(30분 영상 기준 1~2분)에도 라벨을 바꿔줘야 멈춘 것처럼 보이지 않는다.
+      const lbl = prog.stage === "pan" ? "카메라 팬 궤적 분석 중…" : "오디오 분석 중…";
+      progHtml = `<div style="margin-top:4px"><span class="spin"></span><span class="hint">${lbl}</span></div>`;
     } else if (["classifying","building"].includes(j.status) && prog.total > 0) {
       const pct = Math.round(prog.done / prog.total * 100);
       const lbl = j.status === "classifying"

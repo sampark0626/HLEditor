@@ -23,17 +23,20 @@ from flask import Flask, jsonify, render_template, request
 
 import config
 import jobs
+import jobs_dotplay
 import routes_auth
 import routes_band
 import soccer_highlights as sh
 from routes_auth import bp_auth
 from routes_band import bp_band
+from routes_dotplay import bp_dotplay
 from routes_jobs import bp_jobs
 
 app = Flask(__name__)
 app.register_blueprint(bp_jobs)
 app.register_blueprint(bp_auth)
 app.register_blueprint(bp_band)
+app.register_blueprint(bp_dotplay)
 
 config.ensure_data_dirs()
 
@@ -61,6 +64,7 @@ def index():
                            conf_maybe=sh.CONF_MAYBE,
                            workers=sh.VISION_WORKERS,
                            has_key=bool(config.load_gemini_api_key()),
+                           has_roboflow_key=bool(config.load_roboflow_api_key()),
                            ffmpeg_ok=config.ffmpeg_available(),
                            default_title=config.get_default_title(),
                            sensitivities=sh.SENSITIVITY_PRESETS,
@@ -122,6 +126,7 @@ if __name__ == "__main__":
     _cleanup_stale_temp_dirs()
     jobs.restore_recent_results()
     jobs.start_worker()
+    jobs_dotplay.start_worker()
     port = config.get_port()
     url = f"http://127.0.0.1:{port}"
     print(f"\n  ▶ 하이라이트 추출기 UI: {url}\n")

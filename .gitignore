@@ -45,6 +45,8 @@ client_secret.json
 # Generated media / results — output/, results/ 하위로 정리됨 (2026-07)
 output/
 results/
+dotplay_output/
+*.parquet
 highlights*.mp4
 test_clip.mp4
 *_test.mp4

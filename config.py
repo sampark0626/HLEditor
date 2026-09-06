@@ -21,11 +21,19 @@ DEFAULT_PORT = 5000
 OUTPUT_DIR  = _BASE / "output"
 RESULTS_DIR = _BASE / "results"
 
+# dot-play(FM 스타일 2D 버드뷰) 산출물 — mp4 + 좌표 parquet
+DOTPLAY_DIR = _BASE / "dotplay_output"
+
+# roboflow 공개 호스팅 모델 기본값 (Universe). .env로 재정의 가능.
+_DEFAULT_DOTPLAY_PLAYER_MODEL_ID = "football-players-detection-3zvbc/11"
+_DEFAULT_DOTPLAY_FIELD_MODEL_ID = "football-field-detection-f07vi/14"
+
 
 def ensure_data_dirs() -> None:
-    """output/, results/ 디렉터리가 없으면 생성한다."""
+    """output/, results/, dotplay_output/ 디렉터리가 없으면 생성한다."""
     OUTPUT_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
+    DOTPLAY_DIR.mkdir(exist_ok=True)
 
 
 def _load_env_file() -> dict:
@@ -48,6 +56,19 @@ def get_env(key: str, default: str = "") -> str:
 
 def load_gemini_api_key() -> str | None:
     return get_env("GEMINI_API_KEY") or None
+
+
+def load_roboflow_api_key() -> str | None:
+    """dot-play 파이프라인의 선수/피치 키포인트 검출 모델(roboflow 호스팅)용 API 키."""
+    return get_env("ROBOFLOW_API_KEY") or None
+
+
+def get_dotplay_player_model_id() -> str:
+    return get_env("DOTPLAY_PLAYER_MODEL_ID", _DEFAULT_DOTPLAY_PLAYER_MODEL_ID)
+
+
+def get_dotplay_field_model_id() -> str:
+    return get_env("DOTPLAY_FIELD_MODEL_ID", _DEFAULT_DOTPLAY_FIELD_MODEL_ID)
 
 
 def get_youtube_privacy() -> str:

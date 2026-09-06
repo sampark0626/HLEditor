@@ -285,20 +285,30 @@ def extract_video_clip_and_thumbnail(video, peak, workdir, idx, pre_sec=None, po
 
 # ----------------------------------------------------------------------------
 VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 유튜브 하이라이트 영상의 전문 편집자입니다.
-제공된 파일은 한 후보 구간의 축구 경기 비디오 클립입니다.
+제공된 파일은 한 후보 구간의 축구 경기 비디오 클립으로, 비디오(영상)와 오디오(음향)가 모두 포함되어 있습니다.
+반드시 영상 화면과 오디오 트랙을 모두 종합적으로 분석하여 판정하십시오.
 
-[카메라 특성 및 분석 방법]
-- 카메라는 AI 추적 카메라(XbotGo 등)로, 공과 경기 흐름을 따라 좌우로 패닝(회전)합니다.
-- 카메라가 움직이므로 화면상의 배경이 이동할 수 있습니다. 이를 염두에 두고 공의 위치와 선수의 동작을 추적하세요.
-- 광각 풀샷이라 선수와 공이 작게 보일 수 있으니 꼼꼼히 관찰해야 합니다.
+[멀티모달 분석 방법]
+1. **비주얼 분석**:
+   - 카메라는 AI 추적 카메라로, 공과 경기 흐름을 따라 좌우로 패닝(회전)합니다. 배경 이동을 고려하여 공의 궤적과 선수의 몸짓을 추적하세요.
+   - 광각 풀샷이라 선수와 공이 매우 작으므로 집중해서 모니터링해야 합니다.
+   - **중요 경고 (골 그물 vs 보호 그물망)**: 골대 바로 뒤나 경기장 외곽에 설치된 '보호 그물망(안전망/철조망/fence)'과 실제 '골대 안쪽의 골망(Goal net)'을 절대 혼동하지 마십시오. 공이 골대 위나 옆으로 크게 벗어나 뒤쪽의 보호 그물망에 부딪힌 상황은 득점(goal)이나 유효슈팅이 아닌 '단순히 빗나간 플레이'로 엄격히 판정해야 합니다. 실제 골망을 흔들었는지 여부를 선수들의 위치와 함께 상세히 분석하세요.
+
+2. **오디오 분석**:
+   - 제공된 클립의 소리(오디오)를 귀 기울여 분석하세요.
+   - **득점(goal) 상황**: 득점이 일어나는 즉시 선수들과 주변 사람들의 큰 환호성, 박수, 기쁨의 함성, 또는 심판의 득점 휘슬 소리가 동반됩니다.
+   - **슈팅/선방/위협적인 상황**: 아슬아슬하게 비껴간 슛이나 선방이 일어날 때는 주변의 안타까운 탄식("아~", "어우~")이나 박수 소리, 격려의 목소리가 들릴 수 있습니다.
+   - 화면이 멀어서 시각적으로 골 여부가 모호할 때, **오디오의 환호 소리와 기쁨의 외침 여부를 결정적인 증거로 삼아** 판정을 교정하십시오. (아무 반응이 없거나 탄식만 있다면 골이 아닐 확률이 매우 높습니다.)
 
 [판단 기준]
-다음 기준을 참고하여 해당 구간이 진짜 하이라이트인지 엄격하게 판단하고, type을 올바르게 분류하세요:
+다음 기준을 참고하여 해당 구간이 하이라이트일 가능성이 조금이라도 있다면 `highlight`를 `true`로 판단하십시오.
+독단적으로 비하이라이트(`false`)로 배제하지 말고, 장면이 애매하거나 불확실하다면 신뢰도(`confidence` 수치)를 낮게(예: 0.40 ~ 0.65) 부여하여 사용자가 UI 임계 조절을 통해 판단할 수 있도록 지원하십시오.
+
 1. **goal (득점)**: 공이 골라인을 넘어가 골이 되는 순간, 혹은 골 직후 골망을 흔들거나 골 세레머니를 하는 장면이 명확히 관찰될 때.
 2. **shot (슈팅)**: 골대를 향한 슛(골 포스트를 벗어나거나 수비수에 막히는 등 득점이 되지 않은 상황).
 3. **save (세이브)**: 골키퍼가 상대의 슈팅을 쳐내거나 잡아내는 명확한 선방 동작.
 4. **attack (결정적 공격/공방)**: 골문 앞 혼전 상황, 위협적인 크로스, 코너킥/프리킥 세트피스 상황, 골대로 향하는 날카로운 패스나 돌파.
-5. **other (일반 플레이/비하이라이트)**: 단순 패스 돌리기, 빌드업, 골킥, 스로인, 드롭볼, 킥오프 대기, 경기 중단, 경기와 무관한 단순 움직임. 이 경우 `highlight`는 `false`로 설정하십시오.
+5. **other (일반 플레이/비하이라이트)**: 단순 패스 돌리기, 빌드업, 골킥, 스로인, 드롭볼, 킥오프 대기, 경기 중단, 경기와 무관한 단순 움직임. 이 경우에만 `highlight`를 `false`로 설정하십시오.
 
 [출력 형식 및 작성 가이드]
 - **reason**: 유튜브 하이라이트 영상의 챕터 제목 스타일로 작성하세요.
@@ -380,10 +390,29 @@ def classify_with_gemini(video_path, client):
     }
     txt = resp.text.strip().replace("```json", "").replace("```", "").strip()
     try:
-        return json.loads(txt), usage
+        parsed = json.loads(txt)
     except json.JSONDecodeError:
         return ({"highlight": False, "type": "other", "confidence": 0.0,
                  "reason": f"parse_error: {txt[:80]}"}, usage)
+    return _coerce_classification(parsed, txt), usage
+
+
+def _coerce_classification(parsed, raw_txt=""):
+    """모델 응답을 반드시 판별 dict 형태로 만든다.
+
+    JSON으로는 유효하지만 형태가 다른 응답(주로 객체를 배열로 감싼 `[{...}]`)이
+    가끔 온다. 이걸 그대로 호출부에 넘기면 `cand.update(res)`가
+    ValueError로 터지면서 후보 하나 때문에 30분짜리 잡 전체가 실패한다.
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    # 객체 하나를 배열로 감싼 경우: 첫 dict 원소를 채택
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                return item
+    return {"highlight": False, "type": "other", "confidence": 0.0,
+            "reason": f"parse_error: 예상과 다른 형식 {str(parsed)[:60] or raw_txt[:60]}"}
 
 
 def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
@@ -395,7 +424,7 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
     각 future가 완료될 때마다 결과를 즉시 출력해 진행 상황을 실시간으로 보여준다.
 
     should_cancel: 호출하면 True를 돌려주는 콜러블. True가 되면 아직 시작되지
-        않은 작업을 취소하고 루프를 빠져나온다(진행 중인 호출은 마무리됨).
+        않은 작업을 취소하고 루프를 빠져나온다(진행 중인 호출만 마무리됨).
     반환: 사용량/진행 요약 dict
         {"in":입력토큰, "out":출력토큰, "calls":실제호출수,
          "classified":판별완료수, "total":전체후보수, "cancelled":bool}
@@ -405,10 +434,17 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
     usage_total = {"in": 0, "out": 0, "calls": 0}
 
     def _process(idx, cand):
+        # 이미 성공적으로 비전 판별이 완료된 후보라면 비전 호출을 건너뛴다.
+        # 단, 에러가 발생했던 후보는 재시도할 수 있도록 에러 프리픽스가 없을 때만 스킵한다.
+        is_error = any(cand.get("reason", "").startswith(prefix)
+                       for prefix in ("api_error:", "clip_error:", "parse_error:"))
+        if cand.get("confidence") is not None and cand.get("type") is not None and not is_error:
+            return idx, cand, None
+
         # 비디오 클립 및 썸네일 추출도 후보 단위로 격리
         try:
             video_path = extract_video_clip_and_thumbnail(video, cand["peak"], workdir, idx,
-                                                          pre_sec=pre_sec, post_sec=post_sec)
+                                                           pre_sec=pre_sec, post_sec=post_sec)
         except Exception as e:
             return idx, {"highlight": False, "type": "other", "confidence": 0.0,
                          "reason": f"clip_error: {str(e)[:80]}"}, None
@@ -435,7 +471,14 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
                 print("        (사용자 취소 요청 — 진행 중인 호출만 마무리합니다)")
                 break
             idx, res, usage = future.result()
+            # 후보 하나의 응답 형태가 이상해도 잡 전체를 죽이지 않는다 (2차 방어선)
+            if not isinstance(res, dict):
+                res = _coerce_classification(res)
             results[idx] = res
+
+            # 실시간으로 후보자 딕셔너리를 업데이트하여 상위 단계의 상태 파일 저장 시 반영되도록 함
+            cands[idx].update(res)
+
             if usage:
                 usage_total["in"] += usage["in"]
                 usage_total["out"] += usage["out"]
@@ -673,6 +716,54 @@ def save_results(path, video, dur, cands, use_vision):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     print(f"      결과 저장: {path}")
+
+def get_audio_signal(video, workdir, sensitivity="normal"):
+    """영상에서 오디오를 추출하고 전체 시계열 볼륨(baseline 대비 delta) 데이터를 계산하여 반환."""
+    wav = workdir / "audio.wav"
+    if not wav.exists():
+        run(["ffmpeg", "-y", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
+             "-f", "wav", str(wav), "-loglevel", "error"])
+
+    sr, data = wavfile.read(str(wav))
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    data = data.astype(np.float64)
+    data /= (np.max(np.abs(data)) + 1e-9)
+
+    win = int(sr * WIN_SEC)
+    hop = int(sr * HOP_SEC)
+    rms, times = [], []
+    for start in range(0, len(data) - win, hop):
+        seg = data[start:start + win]
+        rms.append(np.sqrt(np.mean(seg ** 2)))
+        times.append(start / sr)
+    rms = np.array(rms)
+    times = np.array(times)
+    db = 20 * np.log10(rms + 1e-9)
+
+    bwin = int(BASELINE_SEC / HOP_SEC)
+    baseline = np.array([np.median(db[max(0, i - bwin):i + bwin + 1])
+                         for i in range(len(db))])
+    delta = db - baseline
+
+    sp = SENSITIVITY_PRESETS.get(sensitivity, SENSITIVITY_PRESETS["normal"])
+    percentile = sp["percentile"]
+    min_db = sp["min_db"]
+    thr = max(np.percentile(delta, percentile), min_db)
+
+    # 차트 가독성 및 UI 렌더링 성능 최적화를 위한 다운샘플링 (최대 2000포인트)
+    max_points = 2000
+    n = len(times)
+    if n > max_points:
+        step = int(np.ceil(n / max_points))
+        times = times[::step]
+        delta = delta[::step]
+
+    return {
+        "times": [round(float(t), 2) for t in times],
+        "delta": [round(float(d), 2) for d in delta],
+        "threshold": float(thr)
+    }
 
 
 def main():

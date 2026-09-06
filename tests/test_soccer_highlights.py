@@ -99,3 +99,38 @@ def test_sensitivity_presets_ordered_by_strictness():
     presets = sh.SENSITIVITY_PRESETS
     assert presets["more"]["percentile"] < presets["normal"]["percentile"] < presets["strict"]["percentile"]
     assert presets["more"]["min_db"] < presets["normal"]["min_db"] < presets["strict"]["min_db"]
+
+
+# ─── 비전 응답 형태 방어 ──────────────────────────────────────────────────────
+# 실제 사고: Gemini가 JSON 배열을 돌려주자 cand.update(res)가
+# "dictionary update sequence element #0 has length 4"로 터지면서
+# 후보 하나 때문에 30분짜리 잡 전체가 실패했다.
+class TestCoerceClassification:
+    def test_dict_passes_through(self):
+        res = {"highlight": True, "type": "goal", "confidence": 0.9, "reason": "골"}
+        assert sh._coerce_classification(res) is res
+
+    def test_object_wrapped_in_array_is_unwrapped(self):
+        inner = {"highlight": True, "type": "goal", "confidence": 0.8, "reason": "골"}
+        assert sh._coerce_classification([inner]) == inner
+
+    @pytest.mark.parametrize("bad", [
+        ["goal", "shot"],   # 문자열 배열 — 실제로 터졌던 형태
+        "goal",
+        42,
+        None,
+        [],
+    ])
+    def test_unusable_shapes_become_safe_parse_error(self, bad):
+        out = sh._coerce_classification(bad)
+        assert isinstance(out, dict)
+        assert out["highlight"] is False
+        assert out["confidence"] == 0.0
+        assert out["reason"].startswith("parse_error:")
+
+    def test_result_is_always_usable_by_dict_update(self):
+        """반환값은 항상 cand.update()에 넣을 수 있어야 한다."""
+        cand = {"peak": 10.0}
+        cand.update(sh._coerce_classification(["goal", "shot"]))
+        assert cand["peak"] == 10.0
+        assert cand["type"] == "other"

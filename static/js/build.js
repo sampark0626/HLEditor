@@ -244,7 +244,8 @@ async function doUploadAll() {
   });
   try {
     const d = await post("/api/jobs/upload-all-youtube", {titles});
-    logLine(`YouTube 전체 업로드 시작: ${d.n}개`, "done");
+    if (d.n) logLine(`YouTube 전체 업로드 시작: ${d.n}개`, "done");
+    else     logLine(`업로드할 새 영상 없음 (이미 진행/완료 ${d.already || 0}개)`, "done");
     lastBuildHash = "";
   } catch(e) { logLine(`업로드 오류: ${e.message}`, "fail"); }
 }
@@ -374,6 +375,11 @@ async function doPostBand() {
   try {
     const d = await post("/api/jobs/post-band", {band_key});
     const n = (d.posted||[]).reduce((s,p) => s + p.n, 0);
+    if (!n && d.note) {
+      logLine(d.note, "fail");
+      if (resultEl) resultEl.innerHTML = `<span class="hint">${esc(d.note)}</span>`;
+      return;
+    }
     logLine(`BAND 게시 완료: ${n}개 영상 링크`, "done");
     if (resultEl) resultEl.innerHTML =
       (d.posted||[]).map(p =>

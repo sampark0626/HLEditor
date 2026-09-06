@@ -158,6 +158,10 @@ function renderCands(jid) {
     <button class="ghost sm" onclick="selAll('${jid}',true)">전체 선택</button>
     <button class="ghost sm" onclick="selAll('${jid}',false)">전체 해제</button>
   </div>
+  <!-- 오디오 타임라인 시계열 차트 컨테이너 -->
+  <div class="chart-container" id="audio-chart-${jid}">
+    <div class="hint" style="padding:10px 0;text-align:center">오디오 신호 대기 중...</div>
+  </div>
   <video id="preview-${jid}" style="width:100%;max-height:280px;background:#000;border-radius:8px;margin-bottom:10px;display:none" controls></video>
   <div style="overflow-x:auto;max-height:420px;overflow-y:auto">
     <table>
@@ -172,6 +176,12 @@ function renderCands(jid) {
     <span class="hint" id="sc-${jid}">${n}개 선택됨</span>
     <button onclick="saveApproved('${jid}')">${saveBtnLabel}</button>
   </div>`;
+
+  // 차트 렌더링/로딩 자동 트리거
+  setTimeout(() => {
+    if (jobSignals[jid]) renderAudioChart(jid);
+    else loadAudioSignal(jid);
+  }, 0);
 }
 
 // ─── 구간 미리보기 ───────────────────────────────────────
@@ -364,4 +374,300 @@ async function bulkSaveAndBuild() {
       logLine(`⚠ ${n}: 채택 0개 — 생성 제외`, "fail"));
     go("build");
   } catch(e) { logLine("오류: " + e.message, "fail"); }
+}
+
+
+// ─── 오디오 시그널 타임라인 및 수동 구간 추가 ───────────────────────
+async function loadAudioSignal(jid) {
+  const container = document.getElementById(`audio-chart-${jid}`);
+  if (!container) return;
+  container.innerHTML = '<div class="hint" style="padding:15px 0;text-align:center"><span class="spin"></span>오디오 음량 분석 데이터를 가져오는 중...</div>';
+  try {
+    const res = await fetch(`/api/jobs/${jid}/audio-signal`);
+    const data = await res.json();
+    if (data.error) {
+      container.innerHTML = `<div class="hint fail" style="padding:15px 0;text-align:center">오디오 로드 실패: ${data.error}</div>`;
+      return;
+    }
+    jobSignals[jid] = data;
+    renderAudioChart(jid);
+  } catch (e) {
+    container.innerHTML = `<div class="hint fail" style="padding:15px 0;text-align:center">오디오 로드 실패: ${e.message}</div>`;
+  }
+}
+
+function renderAudioChart(jid) {
+  const container = document.getElementById(`audio-chart-${jid}`);
+  const data = jobSignals[jid];
+  if (!container || !data) return;
+
+  container.innerHTML = `
+    <canvas id="canvas-${jid}" style="width:100%; height:130px; display:block; cursor:pointer; background:rgba(255,255,255,0.015); border-radius:6px; border:1px solid rgba(255,255,255,0.05);"></canvas>
+    <div id="chart-tooltip-${jid}" style="position:absolute; display:none; pointer-events:none; background:rgba(15,20,25,0.92); color:#fff; padding:6px 10px; border-radius:4px; border:1px solid rgba(255,255,255,0.15); font-size:11px; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.5);"></div>
+    <div id="chart-actions-${jid}" style="position:absolute; display:none; background:var(--panel); border:1px solid var(--accent); padding:6px 10px; border-radius:6px; z-index:101; box-shadow:0 8px 24px rgba(0,0,0,0.6); gap:8px; align-items:center; transform:translate(-50%, -100%); margin-top:-10px;">
+      <span id="action-time-${jid}" style="font-size:11px; font-weight:bold; color:var(--txt); white-space:nowrap;"></span>
+      <button class="ghost sm" onclick="previewAtTime('${jid}')" style="padding:3px 8px; font-size:11px;">▶ 이동</button>
+      <button class="sm accent-btn" onclick="addManualCandidate('${jid}')" style="padding:3px 8px; font-size:11px;">+ 하이라이트 추가</button>
+      <button class="ghost sm" onclick="closeChartActions('${jid}')" style="padding:1px 5px; font-size:11px; color:var(--muted);">✕</button>
+    </div>
+  `;
+
+  const canvas = document.getElementById(`canvas-${jid}`);
+  const tooltip = document.getElementById(`chart-tooltip-${jid}`);
+  const actions = document.getElementById(`chart-actions-${jid}`);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+
+  // Handle high-DPI displays
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const width = rect.width;
+  const height = rect.height;
+  const padding = { left: 20, right: 20, top: 15, bottom: 15 };
+  const graphWidth = width - padding.left - padding.right;
+  const graphHeight = height - padding.top - padding.bottom;
+
+  const times = data.times;
+  const delta = data.delta;
+  const threshold = data.threshold;
+  const maxTime = times[times.length - 1] || 1;
+
+  let minDelta = Math.min(...delta);
+  let maxDelta = Math.max(...delta);
+  maxDelta = Math.max(maxDelta, threshold + 2);
+  minDelta = Math.min(minDelta, -2);
+  const deltaRange = maxDelta - minDelta || 1;
+
+  function getX(t) {
+    return padding.left + (t / maxTime) * graphWidth;
+  }
+  function getY(d) {
+    return padding.top + graphHeight - ((d - minDelta) / deltaRange) * graphHeight;
+  }
+  function getTimeFromX(x) {
+    const relativeX = x - padding.left;
+    const pct = relativeX / graphWidth;
+    return Math.max(0, Math.min(maxTime, pct * maxTime));
+  }
+
+  function drawBaseGraph(hoverX = null) {
+    ctx.clearRect(0, 0, width, height);
+
+    // 0dB baseline
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, getY(0));
+    ctx.lineTo(width - padding.right, getY(0));
+    ctx.stroke();
+
+    // Threshold line
+    ctx.strokeStyle = "rgba(248, 81, 73, 0.45)"; // --red color
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, getY(threshold));
+    ctx.lineTo(width - padding.right, getY(threshold));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = "rgba(248, 81, 73, 0.7)";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillText(`임계값 (${threshold.toFixed(1)} dB)`, padding.left + 5, getY(threshold) - 4);
+
+    // Gradient Fill
+    const grad = ctx.createLinearGradient(0, padding.top, 0, padding.top + graphHeight);
+    grad.addColorStop(0, "rgba(47, 129, 247, 0.18)"); // --blue color
+    grad.addColorStop(1, "rgba(47, 129, 247, 0.0)");
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(getX(times[0]), getY(0));
+    for (let i = 0; i < times.length; i++) {
+      ctx.lineTo(getX(times[i]), getY(delta[i]));
+    }
+    ctx.lineTo(getX(times[times.length - 1]), getY(0));
+    ctx.closePath();
+    ctx.fill();
+
+    // Wave Line
+    ctx.strokeStyle = "rgba(47, 129, 247, 0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(getX(times[0]), getY(delta[0]));
+    for (let i = 1; i < times.length; i++) {
+      ctx.lineTo(getX(times[i]), getY(delta[i]));
+    }
+    ctx.stroke();
+
+    // Candidate vertical lines
+    const job = allJobs.find(j => j.id === jid);
+    const candidates = jobCands[jid]?.cands || [];
+    const sel = localSel[jid] || new Set();
+
+    candidates.forEach(c => {
+      const cx = getX(c.peak);
+      let color = "rgba(110, 118, 129, 0.35)"; // --rej color
+      let width = 1;
+      if (sel.has(c.idx)) {
+        color = "rgba(63, 185, 80, 0.75)"; // --accent color
+        width = 2;
+      } else if (c.flag === "maybe") {
+        color = "rgba(210, 153, 34, 0.6)"; // --warn color
+      }
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(cx, padding.top);
+      ctx.lineTo(cx, padding.top + graphHeight);
+      ctx.stroke();
+
+      // dot at peak
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(cx, getY(c.delta_db || 0.0), 3, 0, 2 * Math.PI);
+      ctx.fill();
+    });
+
+    // Hover line
+    if (hoverX !== null) {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(hoverX, padding.top);
+      ctx.lineTo(hoverX, padding.top + graphHeight);
+      ctx.stroke();
+
+      // Tooltip point
+      const t = getTimeFromX(hoverX);
+      let closestIdx = 0;
+      let minDiff = Infinity;
+      for (let i = 0; i < times.length; i++) {
+        const diff = Math.abs(times[i] - t);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = i;
+        }
+      }
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(hoverX, getY(delta[closestIdx]), 4.5, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  // Draw initial base graph
+  drawBaseGraph();
+
+  canvas.addEventListener("mousemove", (e) => {
+    const mouseX = e.offsetX;
+    const mouseY = e.offsetY;
+
+    if (mouseX < padding.left || mouseX > width - padding.right) {
+      tooltip.style.display = "none";
+      drawBaseGraph();
+      return;
+    }
+
+    const t = getTimeFromX(mouseX);
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < times.length; i++) {
+      const diff = Math.abs(times[i] - t);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = i;
+      }
+    }
+
+    const dVal = delta[closestIdx];
+    const tsStr = fmtDur(t);
+
+    drawBaseGraph(mouseX);
+
+    tooltip.style.display = "block";
+    tooltip.style.left = `${mouseX + 12}px`;
+    tooltip.style.top = `${mouseY - 45}px`;
+    tooltip.innerHTML = `시간: <b>${tsStr}</b><br/>음량: <b>+${dVal.toFixed(1)} dB</b>`;
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    tooltip.style.display = "none";
+    drawBaseGraph();
+  });
+
+  canvas.addEventListener("click", (e) => {
+    const mouseX = e.offsetX;
+    if (mouseX < padding.left || mouseX > width - padding.right) return;
+
+    const t = getTimeFromX(mouseX);
+    
+    actions.style.display = "flex";
+    actions.style.left = `${mouseX}px`;
+    actions.style.top = `${padding.top + 5}px`;
+    
+    const timeStr = fmtDur(t);
+    document.getElementById(`action-time-${jid}`).textContent = timeStr;
+    actions.dataset.targetTime = t;
+  });
+}
+
+function previewAtTime(jid) {
+  const actions = document.getElementById(`chart-actions-${jid}`);
+  if (!actions) return;
+  const t = parseFloat(actions.dataset.targetTime);
+  const vid = document.getElementById("preview-" + jid);
+  if (!vid) return;
+
+  vid.style.display = "block";
+  const start = Math.max(0, t - 3); // 3초 전부터 재생
+  const seekAndPlay = () => { vid.currentTime = start; vid.play().catch(() => {}); };
+  if (vid.dataset.srcLoaded === jid) {
+    seekAndPlay();
+  } else {
+    vid.src = `/api/jobs/${jid}/source`;
+    vid.dataset.srcLoaded = jid;
+    vid.addEventListener("loadedmetadata", seekAndPlay, {once: true});
+  }
+}
+
+async function addManualCandidate(jid) {
+  const actions = document.getElementById(`chart-actions-${jid}`);
+  if (!actions) return;
+  const t = parseFloat(actions.dataset.targetTime);
+  if (isNaN(t)) return;
+
+  try {
+    logLine(`수동 하이라이트 구간 추가 중: ${fmtDur(t)}`, "start");
+    const res = await post(`/api/jobs/${jid}/candidates/add-manual`, { peak: t });
+    if (res.error) {
+      logLine(`구간 추가 실패: ${res.error}`, "fail");
+      return;
+    }
+
+    logLine(`구간 추가 완료: ${fmtDur(t)}`, "done");
+
+    // 로컬 상태 동기화 및 재랜더링
+    const conf = confVal[jid] || globalConf;
+    const d = await (await fetch(`/api/jobs/${jid}/candidates?conf=${conf}`)).json();
+    jobCands[jid] = {cands: d.candidates, visionUsed: d.vision_used};
+    localSel[jid] = d.approved !== null ? new Set(d.approved) : new Set();
+    
+    renderCands(jid);
+    
+    // 추가 완료 직후 추가된 피크 지점 자동 미리보기 재생
+    previewCand(jid, t);
+    closeChartActions(jid);
+  } catch (e) {
+    logLine(`구간 추가 오류: ${e.message}`, "fail");
+  }
+}
+
+function closeChartActions(jid) {
+  const actions = document.getElementById(`chart-actions-${jid}`);
+  if (actions) actions.style.display = "none";
 }

@@ -18,6 +18,7 @@
   <button class="tb on" role="tab" aria-selected="true"  aria-controls="pane-queue"  onclick="go('queue')">큐 관리 <span class="cnt blue" id="cnt-q">0</span></button>
   <button class="tb"    role="tab" aria-selected="false" aria-controls="pane-review" onclick="go('review')">리뷰 <span class="cnt green" id="cnt-r">0</span></button>
   <button class="tb"    role="tab" aria-selected="false" aria-controls="pane-build"  onclick="go('build')">영상 생성 <span class="cnt warn" id="cnt-b">0</span></button>
+  <button class="tb"    role="tab" aria-selected="false" aria-controls="pane-dotplay" onclick="go('dotplay')">Dot Play <span class="cnt blue" id="cnt-dp">0</span></button>
 </div>
 
 <!-- ══════════════ TAB: 큐 관리 ══════════════ -->
@@ -160,6 +161,8 @@
     </div>
     <div style="display:flex;gap:0;align-items:center" id="pipe-steps"></div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted)" id="pipe-detail"></div>
+    <!-- 단계 실패 시 재개/건너뛰기 버튼 (renderPipeBar가 채운다) -->
+    <div id="pipe-actions" style="display:none;gap:8px;margin-top:10px;flex-wrap:wrap"></div>
   </div>
 
   <!-- 처리 현황 -->
@@ -323,6 +326,114 @@
   </div>
 </div>
 
+<!-- ══════════════ TAB: Dot Play ══════════════ -->
+<div class="pane" id="pane-dotplay">
+
+  <div id="dp-nokey-banner" style="display:none;background:#3a1010;border:1px solid var(--red);border-radius:8px;padding:12px 16px;margin-bottom:14px;font-size:13px">
+    <b style="color:var(--red)">ROBOFLOW_API_KEY 없음</b> — 선수/피치 키포인트 검출 모델(roboflow 호스팅)에 필요합니다.<br>
+    <span class="hint" style="font-size:12px">
+      <a href="https://app.roboflow.com" target="_blank" rel="noopener" style="color:var(--blue)">app.roboflow.com</a>에서 무료 발급 후 .env의 <code style="background:#0d1117;padding:2px 6px;border-radius:4px">ROBOFLOW_API_KEY</code>에 추가, 앱 재시작.
+    </span>
+  </div>
+
+  <div class="card">
+    <div class="ct">Xbotgo 영상 → FM 스타일 2D 버드뷰 변환</div>
+
+    <div class="dp-hero">
+      <svg class="dp-hero-pitch" width="210" height="132" viewBox="0 0 210 132" aria-hidden="true">
+        <rect width="210" height="132" fill="#10281a"/>
+        <g stroke="#2c5c40" stroke-width="1.5" fill="none">
+          <rect x="12" y="12" width="186" height="108"/>
+          <line x1="105" y1="12" x2="105" y2="120"/>
+          <circle cx="105" cy="66" r="17"/>
+          <rect x="12" y="40" width="26" height="52"/>
+          <rect x="172" y="40" width="26" height="52"/>
+        </g>
+        <g>
+          <circle cx="58"  cy="44" r="5" fill="#eb3c3c"/>
+          <circle cx="72"  cy="88" r="5" fill="#eb3c3c"/>
+          <circle cx="46"  cy="66" r="5" fill="#eb3c3c"/>
+          <circle cx="88"  cy="58" r="5" fill="#eb3c3c"/>
+          <circle cx="132" cy="50" r="5" fill="#28a0eb"/>
+          <circle cx="148" cy="80" r="5" fill="#28a0eb"/>
+          <circle cx="122" cy="96" r="5" fill="#28a0eb"/>
+          <circle cx="160" cy="60" r="5" fill="#28a0eb"/>
+          <circle cx="22"  cy="66" r="5" fill="#dcdc28"/>
+          <circle cx="188" cy="66" r="5" fill="#dcdc28"/>
+          <circle cx="104" cy="63" r="3.4" fill="#ffffff" stroke="#141414" stroke-width="1"/>
+        </g>
+      </svg>
+      <div class="dp-hero-body">
+        <p>선수·공 위치를 AI로 검출·추적해 Football Manager 스타일의 2D dot-play 영상으로 변환합니다.</p>
+        <div class="dp-legend">
+          <span><i class="dp-dot" style="background:#eb3c3c"></i>팀 A</span>
+          <span><i class="dp-dot" style="background:#28a0eb"></i>팀 B</span>
+          <span><i class="dp-dot" style="background:#dcdc28"></i>골키퍼</span>
+          <span><i class="dp-dot" style="background:#141414;border:1px solid var(--muted)"></i>심판</span>
+          <span><i class="dp-dot" style="background:#fff"></i>공</span>
+        </div>
+        <div class="hint" style="margin-top:9px;line-height:1.7">
+          검출(YOLO) → 추적(ByteTrack) → 팀분류 → 피치 캘리브레이션 → 스무딩 → 렌더링 순서로 처리됩니다.<br>
+          ⏱ 실측 속도: 프레임당 약 4초(Roboflow API 왕복이 병목) — <b>60초 영상(1/2 샘플링) 기준 약 80분</b>.
+          하이라이트 추출과 별도 워커라 큐 탭 작업을 막지 않습니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="dp-form">
+      <label class="dp-field" style="flex:1;min-width:280px">
+        영상 경로 <span class="hint" style="font-size:11px">(원본 영상 권장 — 편집본은 장면 전환 때문에 추적이 끊깁니다)</span>
+        <span style="display:flex;gap:8px">
+          <input type="text" id="dp-video-path" placeholder="C:\videos\match1.mp4"
+                 style="flex:1" onkeydown="if(event.key==='Enter')dpAddJob()">
+          <button class="ghost" onclick="dpBrowse()">파일 선택…</button>
+        </span>
+      </label>
+      <label class="dp-field">
+        프레임 샘플링
+        <span class="seg" id="dp-stride-seg">
+          <button type="button" onclick="dpSetStride(1,this)">전체</button>
+          <button type="button" class="on" onclick="dpSetStride(2,this)">1/2 권장</button>
+          <button type="button" onclick="dpSetStride(3,this)">1/3</button>
+          <button type="button" onclick="dpSetStride(5,this)">1/5 빠름</button>
+        </span>
+      </label>
+      <button class="accent-btn" id="dp-btn-add" onclick="dpAddJob()" style="padding:8px 22px">변환 시작</button>
+    </div>
+    <div id="dp-add-result" style="margin-top:8px;font-size:12px"></div>
+  </div>
+
+  <div class="card">
+    <div class="ct">하이라이트 영상에 Dot Play 합성 (PiP)</div>
+    <div class="hint" style="margin-bottom:10px;line-height:1.7">
+      완료된 하이라이트를 고르면 <b>원본 영상의 해당 구간들만</b> 분석해, 하이라이트 하단 중앙에
+      2D 버드뷰를 작게 얹은 합성 영상을 만듭니다.<br>
+      편집본을 직접 분석하지 않는 이유: 장면 전환마다 선수 추적이 끊기기 때문 — 그래서
+      <b>원본 영상 파일이 그대로 있어야</b> 합니다. 프레임 샘플링은 위 설정을 함께 사용합니다.
+    </div>
+    <div class="row" style="gap:10px;flex-wrap:wrap">
+      <select id="dp-hl-select" style="min-width:300px;flex:1">
+        <option value="">완료된 하이라이트가 없습니다</option>
+      </select>
+      <button class="ghost sm" onclick="dpLoadHlJobs()">↺ 목록 새로고침</button>
+      <button class="accent-btn" id="dp-btn-pip" onclick="dpAddPip()" style="padding:8px 22px">PiP 합성 시작</button>
+    </div>
+    <div id="dp-pip-result" style="margin-top:8px;font-size:12px"></div>
+  </div>
+
+  <div class="card">
+    <div class="ct">
+      <span>처리 현황</span>
+      <span class="hint" style="text-transform:none;font-weight:400;letter-spacing:0">2초마다 자동 갱신</span>
+    </div>
+    <div id="dp-summary" class="q-summary" style="display:none"></div>
+    <div id="dp-job-list">
+      <div class="dp-empty">아직 추가된 dot-play 작업이 없습니다.<br>
+        <span class="hint">위에서 영상을 선택하고 변환을 시작하세요.</span></div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════ JavaScript ══════════════ -->
 <script>
 // Jinja2 주입 상수 — 정적 JS 파일(static/js/*.js)은 템플릿 처리되지 않으므로
@@ -343,6 +454,7 @@ window.HL_CONFIG = {
 <script src="{{ url_for('static', filename='js/pipeline.js') }}"></script>
 <script src="{{ url_for('static', filename='js/review.js') }}"></script>
 <script src="{{ url_for('static', filename='js/build.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dotplay.js') }}"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 
 <!-- 원스톱 완료 결과 팝업 모달 -->

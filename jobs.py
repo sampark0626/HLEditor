@@ -73,6 +73,7 @@ def new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
     )
     with JLOCK:
         JOBS[jid] = job
+    save_job_state(jid)
     return jid
 
 
@@ -83,6 +84,9 @@ def update(jid, **kw):
         if job is None:
             return
         job.update(kw)
+    non_progress_keys = set(kw.keys()) - {"yt_progress", "progress"}
+    if non_progress_keys:
+        save_job_state(jid)
 
 
 def set_progress(jid, stage, done, total):
@@ -117,6 +121,7 @@ def finalize_pending_delete(jid) -> bool:
     if job.get("workdir") and os.path.exists(job["workdir"]):
         shutil.rmtree(job["workdir"], ignore_errors=True)
     delete_results_file(jid)
+    delete_state_file(jid)
     log.info("[%s] 지연 삭제 완료 (취소된 작업 정리)", jid)
     return True
 
@@ -130,15 +135,106 @@ def delete_results_file(jid) -> None:
         pass
 
 
-def restore_recent_results(max_age_hours: float = 24.0) -> int:
-    """서버 재시작 시 results/ 의 최근 판별 결과를 'ready' 잡으로 복원한다.
+def delete_state_file(jid) -> None:
+    """results/state_{jid}.json을 제거한다."""
+    try:
+        (config.RESULTS_DIR / f"state_{jid}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
 
-    오래된 결과(기본 24시간 초과)는 복원하지 않는다 — 그렇지 않으면 몇 주 전에
-    이미 처리·삭제한 잡들까지 재시작할 때마다 매번 리뷰 큐에 다시 나타나게 된다.
-    원본 영상 파일이 더 이상 존재하지 않는 항목도 건너뛴다.
+
+def save_job_state(jid) -> None:
+    """잡의 전체 상태를 results/state_{jid}.json 파일에 저장한다."""
+    with JLOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            return
+        job_copy = dict(job)
+
+    # monotonic 타임스탬프 계산 및 보존
+    if job_copy.get("started_at") and job_copy.get("finished_at"):
+        job_copy["elapsed_sec"] = round(job_copy["finished_at"] - job_copy["started_at"])
+
+    # JSON 직렬화가 불가능하거나 monotonic이라 무의미한 monotonic 시간 필드 제외
+    job_copy_save = {k: v for k, v in job_copy.items() if k not in ("started_at", "finished_at")}
+
+    state_file = config.RESULTS_DIR / f"state_{jid}.json"
+    try:
+        # 임시 파일 작성 후 교체하는 원자적 쓰기로 혹시 모를 쓰기 중 손상 방지
+        temp_state = state_file.with_name(f"{state_file.name}.tmp")
+        temp_state.write_text(json.dumps(job_copy_save, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_state.replace(state_file)
+    except Exception:
+        log.exception("[%s] 상태 파일 저장 실패", jid)
+
+
+def restore_recent_results(max_age_hours: float = 24.0) -> int:
+    """서버 재시작 시 results/ 의 최근 판별 결과(state_*.json 및 results_*.json)를 복원한다.
+
+    1. state_*.json 파일을 우선적으로 검색하여 완벽한 상태(승인 여부, 상태, 업로드 정보 등)를 복원한다.
+    2. state_*.json이 없으면 하위 호환성을 위해 results_*.json 파일을 검색해 복원한다.
     """
     restored = 0
     now = time.time()
+
+    # 1. state_*.json 복원 시도
+    for path in sorted(config.RESULTS_DIR.glob("state_*.json")):
+        jid = path.stem[len("state_"):]
+        with JLOCK:
+            already_loaded = jid in JOBS
+        if already_loaded:
+            continue
+        age_hours = (now - path.stat().st_mtime) / 3600
+        if age_hours > max_age_hours:
+            continue
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+
+        video = job.get("video")
+        if not video or not os.path.exists(video):
+            continue
+
+        # 중요: 서버가 강제 종료(크래시 등)되어 복구되는 경우, active 상태인 잡은
+        # 백그라운드 워커/빌드가 실행되고 있지 않으므로 "error" 상태로 전환한다.
+        if job.get("status") in ACTIVE_STATUSES:
+            job["status"] = "error"
+            job["error"] = "서버 강제 종료로 인해 작업이 중단되었습니다. [재시도]를 눌러 다시 진행할 수 있습니다."
+
+        # progress 정보는 휘발성이므로 초기화
+        job["progress"] = dict(stage=None, done=0, total=0)
+
+        # yt_progress 도 휘발성이므로 status가 "uploading"이었으면 "error" 상태로 전환
+        if job.get("yt_status") == "uploading":
+            job["yt_status"] = "error"
+            job["yt_error"] = "서버 강제 종료로 인해 업로드가 중단되었습니다."
+        job["yt_progress"] = dict(done=0, total=0)
+
+        # band_status 가 "posting"이었으면 "error" 상태로 전환
+        if job.get("band_status") == "posting":
+            job["band_status"] = "error"
+            job["band_error"] = "서버 강제 종료로 인해 게시가 중단되었습니다."
+
+        # cancel_requested 와 pending_delete 도 초기화
+        job["cancel_requested"] = False
+        job["pending_delete"] = False
+
+        # monotonic 시간 복원
+        job["started_at"] = None
+        job["finished_at"] = None
+
+        # workdir가 없거나 실재하지 않는다면 새로 설정
+        if not job.get("workdir") or not os.path.exists(job["workdir"]):
+            job["workdir"] = str(Path(tempfile.mkdtemp(prefix=f"hl_{jid}_")))
+
+        with JLOCK:
+            if jid not in JOBS:
+                JOBS[jid] = job
+                restored += 1
+        save_job_state(jid)
+
+    # 2. results_*.json 하위 호환용 복원 시도
     for path in sorted(config.RESULTS_DIR.glob("results_*.json")):
         jid = path.stem[len("results_"):]
         with JLOCK:
@@ -177,6 +273,7 @@ def restore_recent_results(max_age_hours: float = 24.0) -> int:
             progress=dict(stage=None, done=0, total=0),
             started_at=None,
             finished_at=None,
+            elapsed_sec=None,
             yt_status=None,
             yt_url=None,
             yt_error=None,
@@ -239,10 +336,15 @@ def _process(jid):
     log.info("[%s] 검출 시작: %s (민감도: %s)", jid, video, job["sensitivity"])
 
     dur = sh.probe_duration(video)
-    cands = sh.detect_spikes(video, wd, percentile=sp["percentile"], min_db=sp["min_db"],
-                             pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"))
-    update(jid, duration=dur, candidates=cands)
-    log.info("[%s] 검출 완료: %.1fs, 후보 %d개", jid, dur, len(cands))
+    if job.get("candidates"):
+        cands = job["candidates"]
+        update(jid, duration=dur)
+        log.info("[%s] 기존 후보 %d개 유지 (검출 단계 건너뜀)", jid, len(cands))
+    else:
+        cands = sh.detect_spikes(video, wd, percentile=sp["percentile"], min_db=sp["min_db"],
+                                 pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"))
+        update(jid, duration=dur, candidates=cands)
+        log.info("[%s] 검출 완료: %.1fs, 후보 %d개", jid, dur, len(cands))
 
     if is_cancelled(jid):
         update(jid, status="error", error="사용자 취소")
@@ -252,6 +354,9 @@ def _process(jid):
     # 팬 궤적 3차 신호 — 실패해도 파이프라인은 계속 (후보 단위 격리와 같은 원칙)
     if cands:
         try:
+            # 30분 영상 기준 1~2분 걸리는 구간이다. 진행 단계를 표시해 주지 않으면
+            # UI가 계속 "오디오 분석 중"으로 보여 멈춘 것처럼 오해하게 된다.
+            set_progress(jid, "pan", 0, 0)
             series = pan_signal.compute_pan_series(video, wd, run=sh.run)
             boosted = pan_signal.annotate_candidates(cands, series)
             update(jid, candidates=cands)
@@ -260,6 +365,8 @@ def _process(jid):
                      "" if series["reliable"] else " (신뢰도 부족 — 미적용)")
         except Exception:
             log.warning("[%s] 팬 궤적 분석 실패 — 신호 없이 진행", jid, exc_info=True)
+        finally:
+            clear_progress(jid)
 
     if is_cancelled(jid):
         update(jid, status="error", error="사용자 취소")
@@ -277,10 +384,14 @@ def _process(jid):
     update(jid, status="classifying")
     set_progress(jid, "classify", 0, len(cands))
 
+    def on_classify_progress(d, t):
+        set_progress(jid, "classify", d, t)
+        save_job_state(jid)
+
     usage = sh.classify_all_parallel(
         cands, video, wd, client, sh.CONF_AUTO, job["workers"],
         should_cancel=lambda: is_cancelled(jid),
-        on_progress=lambda d, t: set_progress(jid, "classify", d, t),
+        on_progress=on_classify_progress,
         pre_sec=job.get("pre_sec"), post_sec=job.get("post_sec"),
     )
     if usage.get("cancelled") or is_cancelled(jid):
@@ -344,8 +455,8 @@ def job_summary(job):
     vu = job["vision_used"]
     n_auto  = sum(1 for c in cands if flag(c, sh.CONF_AUTO, vu) == "auto")
     n_maybe = sum(1 for c in cands if flag(c, sh.CONF_AUTO, vu) == "maybe")
-    elapsed = None
-    if job["started_at"] and job["finished_at"]:
+    elapsed = job.get("elapsed_sec")
+    if elapsed is None and job["started_at"] and job["finished_at"]:
         elapsed = round(job["finished_at"] - job["started_at"])
     return dict(
         id=job["id"],
