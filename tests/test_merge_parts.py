@@ -5,6 +5,8 @@
 - /api/jobs/add: {jobs:[{videos:[a,b]}]} → 병합 잡 1개 (하이라이트도 1개)
 """
 
+import os
+
 import pytest
 
 import app as app_module
@@ -12,9 +14,38 @@ import jobs
 import soccer_highlights as sh
 
 
-def _mkfile(path, data=b"x"):
+def _mkfile(path, data=b"x", mtime=None):
     path.write_bytes(data)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
     return str(path)
+
+
+# ─── order_parts: 촬영 순서(수정시각) 자동 정렬 ─────────────
+def test_order_parts_sorts_by_mtime_ascending(tmp_path):
+    # 자투리(짧은/뒤) 영상이 파일 선택창에서 먼저 골라진 상황을 재현
+    late = _mkfile(tmp_path / "자투리.mp4", mtime=2000)   # 나중에 촬영됨
+    early = _mkfile(tmp_path / "본편.mp4", mtime=1000)     # 먼저 촬영됨
+    assert jobs.order_parts([late, early]) == [early, late]
+
+
+def test_order_parts_natural_name_tiebreak_when_mtime_equal(tmp_path):
+    a = _mkfile(tmp_path / "g_2.mp4", mtime=1500)
+    b = _mkfile(tmp_path / "g_10.mp4", mtime=1500)
+    c = _mkfile(tmp_path / "g_1.mp4", mtime=1500)
+    assert jobs.order_parts([b, a, c]) == [c, a, b]      # 1, 2, 10
+
+
+def test_new_job_stores_parts_in_shooting_order(tmp_path):
+    late = _mkfile(tmp_path / "2부_짧은거.mp4", mtime=5000)
+    early = _mkfile(tmp_path / "1부.mp4", mtime=4000)
+    jid = jobs.new_job(None, source_videos=[late, early])   # 일부러 뒤집어 전달
+    try:
+        job = jobs.JOBS[jid]
+        assert job["source_videos"] == [early, late]        # 앞 영상이 먼저
+        assert job["video_name"] == "1부.mp4"               # 표시 이름도 첫 파트
+    finally:
+        jobs.JOBS.pop(jid, None)
 
 
 # ─── concat_videos ──────────────────────────────────────────

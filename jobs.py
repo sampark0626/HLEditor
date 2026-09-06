@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -34,6 +35,27 @@ BUILD_LOCK = threading.Lock()
 ACTIVE_STATUSES = ("merging", "detecting", "classifying", "building")
 
 
+def _natural_key(s: str):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
+def order_parts(paths):
+    """병합 파트를 촬영 순서(앞→뒤)로 정렬한다.
+
+    XbotGo는 30분을 넘기면 파일을 순차 저장하므로 **파일 수정시각(mtime)이 곧
+    파트 순서**다. 30분 꽉 채운 파트가 먼저, 자투리(짧은) 파트가 항상 뒤로 간다.
+    사용자가 파일 선택창에서 아무 순서로 골라도 여기서 바로잡는다.
+    mtime이 동일하면(드묾) 파일명 자연 정렬로 보조한다.
+    """
+    def key(p):
+        try:
+            mt = round(os.path.getmtime(p), 3)
+        except OSError:
+            mt = 0.0
+        return (mt, _natural_key(os.path.basename(p)))
+    return sorted(paths, key=key)
+
+
 def new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
             pre_sec=None, post_sec=None, source_videos=None):
     jid = uuid.uuid4().hex[:8]
@@ -44,6 +66,7 @@ def new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
     source_videos = [os.path.abspath(p) for p in (source_videos or [])]
     needs_merge = len(source_videos) >= 2
     if needs_merge:
+        source_videos = order_parts(source_videos)   # 촬영 순서로 자동 정렬
         video = str((config.OUTPUT_DIR / "_merged" / f"{jid}.mp4").resolve())
         # 표시 이름은 첫 파트 이름 그대로 — YouTube 제목이 깔끔하게 나오도록.
         # "여러 파트 합본"임은 큐 UI가 n_parts 배지로 따로 보여준다.
@@ -373,9 +396,24 @@ def _process(jid):
     # 파트 병합 — 한 경기가 여러 파일로 나뉜 잡(XbotGo 30분 자동 분할)은 먼저
     # 하나로 이어붙인다. 성공하면 needs_merge=False 로 내려 재시도 시 다시 안 합친다.
     if job.get("needs_merge"):
-        srcs = job.get("source_videos") or []
-        update(jid, status="merging")
-        log.info("[%s] 파트 %d개 병합 시작 → %s", jid, len(srcs), video)
+        srcs = order_parts(job.get("source_videos") or [])   # 방어적으로 재정렬
+        update(jid, status="merging", source_videos=srcs)
+        # 각 파트 길이를 확인해 순서를 검증한다 — XbotGo 규칙상 자투리(짧은) 파트는
+        # 항상 마지막이어야 한다. 앞 파트가 뒤 파트보다 짧으면 순서 의심 → 경고.
+        durs = []
+        for p in srcs:
+            try:
+                durs.append(sh.probe_duration(p))
+            except Exception:
+                durs.append(None)
+        order_desc = ", ".join(
+            f"{os.path.basename(p)}({d/60:.0f}분)" if d else os.path.basename(p)
+            for p, d in zip(srcs, durs))
+        log.info("[%s] 파트 %d개 병합 시작 (순서: %s) → %s", jid, len(srcs), order_desc, video)
+        known = [d for d in durs if d]
+        if len(known) >= 2 and any(a + 30 < b for a, b in zip(known, known[1:])):
+            log.warning("[%s] 파트 순서 의심 — 뒤 파트가 앞 파트보다 깁니다. "
+                        "파일 수정시각 기준 정렬 결과이니 원본 타임스탬프를 확인하세요.", jid)
         Path(video).parent.mkdir(parents=True, exist_ok=True)
         sh.concat_videos(srcs, video, workdir=wd)
         update(jid, needs_merge=False)

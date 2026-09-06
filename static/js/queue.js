@@ -110,6 +110,18 @@ function _groupOf(path) {
   return mergeGroups.find(g => g.includes(path)) || null;
 }
 
+// 파일명 자연 정렬 비교기 (1부 < 2부, part2 < part10)
+function _naturalCmp(a, b) {
+  return String(a).localeCompare(String(b), undefined, {numeric: true, sensitivity: "base"});
+}
+
+// 그룹 파트를 표시/전송용으로 정렬 — 미리보기는 파일명 순.
+// (최종 병합 순서는 서버가 파일 수정시각 기준으로 다시 확정한다)
+function _orderedMembers(group) {
+  return staged.filter(x => group.includes(x.path))
+               .sort((m1, m2) => _naturalCmp(m1.basename, m2.basename));
+}
+
 function toggleStagedCheck(path, on) {
   if (on) stagedChecked.add(path); else stagedChecked.delete(path);
   // 합치기 버튼 활성/비활성만 갱신 (전체 재렌더 불필요)
@@ -159,8 +171,8 @@ function renderStaged() {
     if (g) {
       if (seenGroups.has(g)) return;        // 그룹의 첫 파트에서만 블록을 그린다
       seenGroups.add(g);
-      const members = staged.filter(x => g.includes(x.path));
-      const gi = staged.findIndex(x => x.path === g[0]);
+      const members = _orderedMembers(g);   // 파일명 순 미리보기 (최종 순서는 서버가 확정)
+      const gi = staged.findIndex(x => x.path === members[0].path);
       const dupAny = members.some(m => m.dup);
       rows += `
         <div class="staged-row group ${dupAny ? "dup" : ""}" style="flex-wrap:wrap">
@@ -169,9 +181,10 @@ function renderStaged() {
           </span>
           ${dupAny ? '<span class="staged-dup-badge">⚠ 중복</span>' : ""}
           ${_sensSelectHtml(members[0].sensitivity, `setStagedSens(${gi}, this.value, true)`)}
-          <button class="ghost sm" onclick="ungroupMerge('${esc(g[0])}')">묶음 해제</button>
+          <button class="ghost sm" onclick="ungroupMerge('${esc(members[0].path)}')">묶음 해제</button>
           <div style="flex-basis:100%;padding:4px 0 0 22px">
-            ${members.map(m => `<div class="hint" style="font-size:12px">• ${esc(m.basename)}</div>`).join("")}
+            ${members.map((m, k) => `<div class="hint" style="font-size:12px">${k + 1}. ${esc(m.basename)}</div>`).join("")}
+            <div class="hint" style="font-size:11px;opacity:.7">병합 순서는 파일 생성(수정) 시각 기준으로 자동 정렬됩니다</div>
           </div>
         </div>`;
     } else {
@@ -242,7 +255,7 @@ function stagedToJobItems(opts) {
     if (seen.has(s.path)) continue;
     const g = _groupOf(s.path);
     if (g) {
-      const members = staged.filter(x => g.includes(x.path));
+      const members = _orderedMembers(g);
       members.forEach(m => seen.add(m.path));
       if (members.some(m => m.dup)) continue;
       if (members.length >= 2) {
