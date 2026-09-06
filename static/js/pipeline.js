@@ -78,8 +78,7 @@ async function doStartPipeline() {
 // 파이프라인 시작
 async function doOnestop(mode) {
   if (!staged.length) syncStaged();
-  const toAdd = staged.filter(s => !s.dup);
-  if (!toAdd.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
+  if (!staged.some(s => !s.dup)) { logLine("추가할 영상이 없습니다.", "fail"); return; }
   // 인증 토큰 실시간 검증 (YouTube는 항상, BAND 모드면 BAND도 추가 확인)
   try {
     const ytSt = await (await fetch("/api/auth/youtube/status")).json();
@@ -105,7 +104,8 @@ async function doOnestop(mode) {
   const workers  = parseInt(document.getElementById("workers").value) || 6;
   const pre_sec  = parseFloat(document.getElementById("setting-pre")?.value) || 8;
   const post_sec = parseFloat(document.getElementById("setting-post")?.value) || 5;
-  const jobs = toAdd.map(s => ({video: s.path, sensitivity: s.sensitivity, workers, pre_sec, post_sec}));
+  const jobs = stagedToJobItems({workers, pre_sec, post_sec});
+  if (!jobs.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
   _pipeBtns(true);
   try {
     const d = await post("/api/jobs/add", {jobs, workers});
@@ -385,7 +385,7 @@ async function advancePipeline(jobs) {
 
   // ── step: processing ─────────────────────────────────
   if (step === "processing") {
-    const active = pJobs.filter(j => ["pending","detecting","classifying"].includes(j.status));
+    const active = pJobs.filter(j => ["pending","merging","detecting","classifying"].includes(j.status));
     if (active.length > 0) {
       detail.textContent =
         `처리 중: ${active.length}개 남음 (${pJobs.filter(j => j.status==="ready").length}개 완료)`;
@@ -410,7 +410,7 @@ async function advancePipeline(jobs) {
   // ── step: building ───────────────────────────────────
   } else if (step === "building") {
     const building = pJobs.filter(j => j.status === "building");
-    const notBuilt = pJobs.filter(j => ["ready","pending","detecting","classifying"].includes(j.status));
+    const notBuilt = pJobs.filter(j => ["ready","pending","merging","detecting","classifying"].includes(j.status));
     if (building.length > 0 || (elapsed < PIPE_STEP_DELAY && notBuilt.length > 0)) {
       detail.textContent = `영상 생성 중: ${building.length + notBuilt.length}개 남음`;
       return;

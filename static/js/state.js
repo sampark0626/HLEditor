@@ -21,6 +21,8 @@ let buildData  = {};     // jid → {title, output}
 let activePne  = "queue";
 let logStarted = false;
 let staged     = [];     // [{path, basename, sensitivity}]
+let mergeGroups = [];    // [[path, path, ...], ...] — "한 경기로 합치기"로 묶인 파트 경로들
+let stagedChecked = new Set();  // 그룹 묶기용으로 체크된 파트 경로 (렌더 간 유지)
 let pathsTimer = null;
 let globalConf = CONF_AUTO;
 

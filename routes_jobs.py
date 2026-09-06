@@ -51,32 +51,56 @@ def api_jobs_add():
         job_list = [{"video": v, "sensitivity": sensitivity}
                     for v in body.get("videos", [])]
 
-    # 현재 활성 잡의 경로 집합 (중복 방지)
+    # 현재 활성 잡의 경로 집합 (중복 방지) — 병합 잡은 원본 파트 경로까지 포함한다.
     with jobs.JLOCK:
-        active_paths = {j["video"] for j in jobs.JOBS.values()
-                        if j["status"] not in ("done", "error")}
+        active_paths = set()
+        for j in jobs.JOBS.values():
+            if j["status"] in ("done", "error"):
+                continue
+            active_paths.add(j["video"])
+            active_paths.update(j.get("source_videos") or [])
 
     added, errors, skipped = [], [], []
     for item in job_list:
-        v = item.get("video", "").strip().strip('"')
-        if not v:
+        # 신형: {videos: [p1, p2, ...]} — 2개 이상이면 한 경기로 병합.
+        # 구형/단일: {video: "..."}
+        raw_list = item.get("videos")
+        if isinstance(raw_list, list) and raw_list:
+            parts = [p.strip().strip('"') for p in raw_list if p and p.strip()]
+        else:
+            one = item.get("video", "").strip().strip('"')
+            parts = [one] if one else []
+        if not parts:
             continue
-        abs_v = os.path.abspath(v)
-        if not os.path.exists(abs_v):
-            errors.append(f"파일 없음: {os.path.basename(v)}")
+
+        abs_parts = [os.path.abspath(p) for p in parts]
+        missing = [p for p, a in zip(parts, abs_parts) if not os.path.exists(a)]
+        if missing:
+            errors.append("파일 없음: " + ", ".join(os.path.basename(p) for p in missing))
             continue
-        if abs_v in active_paths:
-            skipped.append(os.path.basename(v))
+        dup = [a for a in abs_parts if a in active_paths]
+        if dup:
+            skipped.append(os.path.basename(dup[0])
+                           + (f" 외 {len(dup)-1}개" if len(dup) > 1 else ""))
             continue
+
         sens     = item.get("sensitivity", "normal")
         w        = max(1, min(int(item.get("workers", global_workers)), 8))
         pre_sec  = item.get("pre_sec")
         post_sec = item.get("post_sec")
-        jid = jobs.new_job(abs_v, sens, w, pre_sec=pre_sec, post_sec=post_sec)
+
+        if len(abs_parts) >= 2:
+            jid = jobs.new_job(None, sens, w, pre_sec=pre_sec, post_sec=post_sec,
+                               source_videos=abs_parts)
+            log.info("잡 추가(병합 %d개): %s [%s] (민감도: %s)",
+                     len(abs_parts), os.path.basename(abs_parts[0]), jid, sens)
+        else:
+            jid = jobs.new_job(abs_parts[0], sens, w, pre_sec=pre_sec, post_sec=post_sec)
+            log.info("잡 추가: %s [%s] (민감도: %s)",
+                     os.path.basename(abs_parts[0]), jid, sens)
         jobs.JOB_QUEUE.put(jid)
         added.append(jid)
-        active_paths.add(abs_v)
-        log.info("잡 추가: %s [%s] (민감도: %s)", os.path.basename(abs_v), jid, sens)
+        active_paths.update(abs_parts)
 
     return jsonify({"added": added, "errors": errors, "skipped": skipped})
 
@@ -341,6 +365,7 @@ def api_job_delete(jid):
         shutil.rmtree(job["workdir"], ignore_errors=True)
     jobs.delete_results_file(jid)
     jobs.delete_state_file(jid)
+    jobs.delete_merged_file(jid)
     log.info("잡 삭제: %s", jid)
     return jsonify({"ok": True})
 

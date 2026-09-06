@@ -159,6 +159,25 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 ### 4. 메모리
 오디오는 16kHz mono로 추출하므로 30분이어도 약 60MB 수준, 문제 없음. 프레임은 후보 구간만 그때그때 추출·삭제하므로 누적되지 않음.
 
+### 5. 파트 병합 — XbotGo 30분 자동 분할 대응 (2026-09-06)
+XbotGo는 촬영이 30분을 넘으면 파일을 자동으로 잘라 저장한다. 한 경기가 `1부.mp4`·`2부.mp4`
+로 나뉘면 예전엔 잡이 2개 생겨 하이라이트·YouTube 업로드도 2개가 됐다.
+
+**해결**: 큐 관리 탭에서 파트 파일들을 체크해 **[선택한 파일 한 경기로 합치기]** 를 누르면
+하나의 잡으로 묶인다. 처리 시작 시 워커가 먼저 `ffmpeg -f concat -c copy`(파라미터가 다르면
+재인코딩 폴백)로 파트를 이어붙인 뒤, 그 다음 단계(검출·비전·빌드·업로드)는 기존과 동일하게
+**단일 파일**로 진행한다 → 하이라이트/링크 1개.
+
+- 프런트: `staged` + `mergeGroups`(`state.js`) → `stagedToJobItems()`가 `{videos:[p1,p2,…]}`
+  항목으로 변환해 `/api/jobs/add`에 보낸다. 단일 파일은 기존대로 `{video:"…"}`.
+- 백엔드: `jobs.new_job(source_videos=[…])` → `needs_merge=True`, `video`는 `output/_merged/{jid}.mp4`.
+  `_process` 첫 단계에서 병합(`status="merging"`) 후 `needs_merge=False`. 재시도/복원은 병합
+  완료 여부를 이 플래그로 판단해 다시 안 합친다. 잡 삭제 시 `output/_merged/{jid}.mp4`도 함께 정리.
+- `soccer_highlights.concat_videos(parts, out_path, workdir=None)` — concat 헬퍼.
+- 표시 이름(`video_name`)은 첫 파트 이름 그대로 두고, 합본임은 큐 UI가 `n_parts` 배지로 보여준다.
+- **한계**: 병합본 용량 ≈ 파트 합(디스크 필요). XbotGo 파일 롤오버 시 경계에서 1~2초가
+  유실될 수 있어 정확히 30:00에 걸친 장면은 미세하게 잘릴 수 있다(원본에 없는 프레임).
+
 ---
 
 ## 원스톱 파이프라인 계약 (2026-08-01 수정)

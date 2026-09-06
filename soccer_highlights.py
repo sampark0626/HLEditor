@@ -148,6 +148,51 @@ def probe_duration(video):
 
 
 # ----------------------------------------------------------------------------
+def concat_videos(parts, out_path, workdir=None):
+    """여러 영상 파일을 순서대로 하나로 이어붙인다.
+
+    XbotGo는 촬영이 30분을 넘으면 파일을 자동으로 잘라 저장하므로, 한 경기가
+    part1·part2… 로 나뉜다. 같은 카메라·설정으로 촬영된 파트들은 코덱/해상도/
+    fps가 동일하므로 재인코딩 없이(`-c copy`) 빠르게 병합된다. 혹시 파라미터가
+    달라 stream copy가 실패하면 한 번 재인코딩으로 폴백한다.
+
+    parts: 병합할 파일 경로 리스트 (사용자가 지정한 순서 그대로)
+    out_path: 결과 파일 경로 (부모 디렉터리는 미리 생성해 둘 것)
+    workdir: concat 목록 파일을 둘 임시 디렉터리 (기본: out_path 의 부모)
+    """
+    parts = [str(p) for p in parts]
+    if len(parts) < 2:
+        raise ValueError("concat_videos: 파트가 2개 이상이어야 합니다")
+    for p in parts:
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"병합할 파일 없음: {p}")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wd = Path(workdir) if workdir else out_path.parent
+    wd.mkdir(parents=True, exist_ok=True)
+    listfile = wd / "merge_parts.txt"
+    # concat 데먹서는 백슬래시를 이스케이프로 해석하므로 Windows에서도 forward
+    # slash(as_posix) 경로를 써야 한다. 경로 안 작은따옴표는 '\'' 로 이스케이프.
+    lines = []
+    for p in parts:
+        safe = Path(p).as_posix().replace("'", "'\\''")
+        lines.append(f"file '{safe}'\n")
+    listfile.write_text("".join(lines), encoding="utf-8")
+
+    base = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listfile)]
+    try:
+        run(base + ["-c", "copy", "-fflags", "+genpts",
+                    str(out_path), "-loglevel", "error"])
+    except RuntimeError:
+        # stream copy 실패 — 코덱 파라미터가 파트마다 다른 경우. 재인코딩 폴백.
+        run(base + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(out_path), "-loglevel", "error"])
+    return str(out_path)
+
+
+# ----------------------------------------------------------------------------
 def detect_spikes(video, workdir, percentile=None, min_db=None,
                   pre_sec=None, post_sec=None):
     """오디오를 추출하고 볼륨 급증 후보 구간을 반환.

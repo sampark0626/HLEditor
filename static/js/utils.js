@@ -9,7 +9,7 @@ async function post(url, body) {
 }
 
 function stBadge(s) {
-  const L = {pending:"대기중",detecting:"검출중",classifying:"판별중",
+  const L = {pending:"대기중",merging:"병합중",detecting:"검출중",classifying:"판별중",
              ready:"준비됨",building:"생성중",done:"완료",error:"오류"};
   return `<span class="st st-${s}">${L[s]||s}</span>`;
 }

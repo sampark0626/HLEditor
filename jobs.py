@@ -31,16 +31,37 @@ JOB_QUEUE = queue.Queue()
 JLOCK = threading.Lock()
 BUILD_LOCK = threading.Lock()
 
-ACTIVE_STATUSES = ("detecting", "classifying", "building")
+ACTIVE_STATUSES = ("merging", "detecting", "classifying", "building")
 
 
 def new_job(video, sensitivity="normal", workers=sh.VISION_WORKERS,
-            pre_sec=None, post_sec=None):
+            pre_sec=None, post_sec=None, source_videos=None):
     jid = uuid.uuid4().hex[:8]
+
+    # source_videos 가 2개 이상이면 "한 경기가 여러 파트로 나뉜" 잡이다.
+    # (XbotGo 30분 자동 분할). 처리 시작 시 _process 가 먼저 하나로 병합하고,
+    # 그 뒤 단계는 기존과 동일하게 단일 파일로 진행한다 → 하이라이트/업로드가 1개.
+    source_videos = [os.path.abspath(p) for p in (source_videos or [])]
+    needs_merge = len(source_videos) >= 2
+    if needs_merge:
+        video = str((config.OUTPUT_DIR / "_merged" / f"{jid}.mp4").resolve())
+        # 표시 이름은 첫 파트 이름 그대로 — YouTube 제목이 깔끔하게 나오도록.
+        # "여러 파트 합본"임은 큐 UI가 n_parts 배지로 따로 보여준다.
+        video_name = os.path.basename(source_videos[0])
+    else:
+        # source_videos 가 1개뿐이면 병합 아님 — 그 파일을 그대로 쓴다.
+        if video is None and source_videos:
+            video = source_videos[0]
+        video = os.path.abspath(video)
+        video_name = os.path.basename(video)
+        source_videos = []
+
     job = dict(
         id=jid,
-        video=os.path.abspath(video),
-        video_name=os.path.basename(video),
+        video=video,
+        video_name=video_name,
+        source_videos=source_videos,   # [] 이면 단일 파일 잡
+        needs_merge=needs_merge,
         sensitivity=sensitivity,
         workers=workers,
         pre_sec=float(pre_sec) if pre_sec is not None else sh.PRE_SEC,
@@ -122,6 +143,7 @@ def finalize_pending_delete(jid) -> bool:
         shutil.rmtree(job["workdir"], ignore_errors=True)
     delete_results_file(jid)
     delete_state_file(jid)
+    delete_merged_file(jid)
     log.info("[%s] 지연 삭제 완료 (취소된 작업 정리)", jid)
     return True
 
@@ -139,6 +161,15 @@ def delete_state_file(jid) -> None:
     """results/state_{jid}.json을 제거한다."""
     try:
         (config.RESULTS_DIR / f"state_{jid}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def delete_merged_file(jid) -> None:
+    """output/_merged/{jid}.mp4 를 제거한다 (파트 병합 잡이 삭제될 때 함께 정리).
+    병합본은 파트 용량 합만큼 커서 잡을 지우면 반드시 같이 지운다."""
+    try:
+        (config.OUTPUT_DIR / "_merged" / f"{jid}.mp4").unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -193,7 +224,12 @@ def restore_recent_results(max_age_hours: float = 24.0) -> int:
             continue
 
         video = job.get("video")
-        if not video or not os.path.exists(video):
+        srcs = job.get("source_videos") or []
+        if job.get("needs_merge") and srcs:
+            # 아직 병합 전이라 merged 파일은 없다 — 원본 파트가 다 살아 있으면 복원 가능.
+            if not all(os.path.exists(s) for s in srcs):
+                continue
+        elif not video or not os.path.exists(video):
             continue
 
         # 중요: 서버가 강제 종료(크래시 등)되어 복구되는 경우, active 상태인 잡은
@@ -332,7 +368,23 @@ def _process(jid):
 
     wd = Path(tempfile.mkdtemp(prefix=f"hl_{jid}_"))
     t_start = time.monotonic()
-    update(jid, workdir=str(wd), status="detecting", started_at=t_start)
+    update(jid, workdir=str(wd), started_at=t_start)
+
+    # 파트 병합 — 한 경기가 여러 파일로 나뉜 잡(XbotGo 30분 자동 분할)은 먼저
+    # 하나로 이어붙인다. 성공하면 needs_merge=False 로 내려 재시도 시 다시 안 합친다.
+    if job.get("needs_merge"):
+        srcs = job.get("source_videos") or []
+        update(jid, status="merging")
+        log.info("[%s] 파트 %d개 병합 시작 → %s", jid, len(srcs), video)
+        Path(video).parent.mkdir(parents=True, exist_ok=True)
+        sh.concat_videos(srcs, video, workdir=wd)
+        update(jid, needs_merge=False)
+        log.info("[%s] 병합 완료: %s", jid, video)
+        if is_cancelled(jid):
+            update(jid, status="error", error="사용자 취소")
+            return
+
+    update(jid, status="detecting")
     log.info("[%s] 검출 시작: %s (민감도: %s)", jid, video, job["sensitivity"])
 
     dur = sh.probe_duration(video)
@@ -474,6 +526,8 @@ def job_summary(job):
         output=job["output"],
         vision_used=vu,
         elapsed_sec=elapsed,
+        n_parts=len(job.get("source_videos") or []),
+        needs_merge=bool(job.get("needs_merge")),
         yt_status=job.get("yt_status"),
         yt_url=job.get("yt_url"),
         yt_error=job.get("yt_error"),

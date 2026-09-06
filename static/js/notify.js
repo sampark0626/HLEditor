@@ -34,7 +34,7 @@ function checkNotifications(jobs) {
         sendNotif("오류 발생", j.video_name);
       }
     }
-    if (["pending","detecting","classifying","building"].includes(j.status)) hasProcessing = true;
+    if (["pending","merging","detecting","classifying","building"].includes(j.status)) hasProcessing = true;
     prevStatuses[j.id] = j.status;
   }
   // 전체 처리 완료 알림 (마지막 잡이 완료될 때)
