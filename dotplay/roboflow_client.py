@@ -79,8 +79,20 @@ def infer(
                     f"Roboflow가 인증을 거부했습니다(HTTP {resp.status_code}). "
                     ".env의 ROBOFLOW_API_KEY가 올바른지, 사용량 한도를 넘지 않았는지 확인하세요."
                 )
+            if resp.status_code == 402:
+                # Payment Required — 무료 크레딧/추론 한도 소진 또는 결제수단 필요.
+                # 재시도해도 소용없다. 키가 URL 쿼리로 실려 오므로 메시지에서 가린다.
+                raise RoboflowAuthError(
+                    "Roboflow 사용량 한도를 초과했습니다(HTTP 402 Payment Required). "
+                    "무료 추론 크레딧이 소진됐거나 결제수단 등록이 필요합니다. "
+                    "Roboflow 요금제를 확인하거나 월 사용량이 초기화될 때까지 기다리세요."
+                )
             if resp.status_code not in _RETRY_STATUS:
-                resp.raise_for_status()  # 그 밖의 4xx는 즉시 전파
+                # 그 밖의 4xx는 즉시 전파하되, API 키가 URL에 실려 있으므로 가린다.
+                try:
+                    resp.raise_for_status()
+                except requests.HTTPError as e:
+                    raise requests.HTTPError(_redact(str(e), api_key)) from None
                 return resp.json()
             last_exc = RuntimeError(f"HTTP {resp.status_code} {resp.reason}")
         if attempt < retries:
