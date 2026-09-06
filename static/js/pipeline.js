@@ -78,7 +78,15 @@ async function doStartPipeline() {
 // 파이프라인 시작
 async function doOnestop(mode) {
   if (!staged.length) syncStaged();
-  if (!staged.some(s => !s.dup)) { logLine("추가할 영상이 없습니다.", "fail"); return; }
+  if (!staged.some(s => !s.dup)) {
+    const dupN = staged.filter(s => s.dup).length;
+    const msg = dupN
+      ? `시작할 영상이 없습니다 — ${dupN}개 항목이 모두 이미 큐에 있습니다(중복). 큐에서 기존 잡을 지우거나 다른 영상을 선택하세요.`
+      : "시작할 영상이 없습니다. 파일을 선택하거나 경로를 입력하세요.";
+    logLine(msg, "fail");
+    alert(msg);
+    return;
+  }
   // 인증 토큰 실시간 검증 (YouTube는 항상, BAND 모드면 BAND도 추가 확인)
   try {
     const ytSt = await (await fetch("/api/auth/youtube/status")).json();
@@ -105,11 +113,23 @@ async function doOnestop(mode) {
   const pre_sec  = parseFloat(document.getElementById("setting-pre")?.value) || 8;
   const post_sec = parseFloat(document.getElementById("setting-post")?.value) || 5;
   const jobs = stagedToJobItems({workers, pre_sec, post_sec});
-  if (!jobs.length) { logLine("추가할 영상이 없습니다.", "fail"); return; }
+  if (!jobs.length) {
+    logLine("시작할 영상이 없습니다 (모두 중복).", "fail");
+    alert("시작할 영상이 없습니다 — 선택한 항목이 모두 이미 큐에 있습니다(중복).");
+    return;
+  }
   _pipeBtns(true);
   try {
     const d = await post("/api/jobs/add", {jobs, workers});
-    if (!d.added?.length) { logLine("추가 실패", "fail"); _pipeBtns(false); return; }
+    if (!d.added?.length) {
+      const reasons = [...(d.skipped || []).map(n => `중복: ${n}`), ...(d.errors || [])];
+      logLine("원스톱 시작 실패 — 추가된 작업 없음", "fail");
+      alert("원스톱을 시작하지 못했습니다 — 큐에 추가된 작업이 없습니다.\n" +
+            (reasons.length ? reasons.join("\n")
+                            : "이미 처리 중이거나 파일을 찾을 수 없습니다."));
+      _pipeBtns(false);
+      return;
+    }
     // /api/jobs/add의 added는 잡 id 문자열 배열이다. 예전 코드가 객체로 보고
     // j.id를 꺼내는 바람에 jobIds가 [undefined]가 되어, 파이프라인이 자기 잡을
     // 하나도 못 찾고 20초 뒤 "작업을 찾을 수 없습니다"로 죽었다.

@@ -245,8 +245,13 @@ function stagedToJobItems(opts) {
       const members = staged.filter(x => g.includes(x.path));
       members.forEach(m => seen.add(m.path));
       if (members.some(m => m.dup)) continue;
-      items.push({videos: members.map(m => m.path),
-                  sensitivity: members[0].sensitivity, ...opts});
+      if (members.length >= 2) {
+        items.push({videos: members.map(m => m.path),
+                    sensitivity: members[0].sensitivity, ...opts});
+      } else if (members.length === 1) {
+        // 그룹이 파트 1개로 쪼그라든 경우 — 단일 파일 잡으로 처리
+        items.push({video: members[0].path, sensitivity: members[0].sensitivity, ...opts});
+      }
     } else {
       seen.add(s.path);
       if (s.dup) continue;
@@ -265,7 +270,11 @@ async function doAdd() {
   const post_sec = parseFloat(document.getElementById("setting-post")?.value) || 5;
   const jobs = stagedToJobItems({workers, pre_sec, post_sec});
   if (!jobs.length) {
-    if (dupCount) logLine(`${dupCount}개 모두 이미 처리 중(중복). 건너뜁니다.`, "fail");
+    const msg = dupCount
+      ? `추가할 작업이 없습니다 — ${dupCount}개 항목이 모두 이미 큐에 있습니다(중복).`
+      : "추가할 영상이 없습니다. 파일을 선택하거나 경로를 입력하세요.";
+    logLine(msg, "fail");
+    alert(msg);
     return;
   }
   logLine(`작업 ${jobs.length}개 큐에 추가 중…`, "start");
@@ -280,7 +289,17 @@ async function doAdd() {
     (d.skipped || []).forEach(n => logLine(`중복 건너뜀: ${n}`, "fail"));
     (d.errors  || []).forEach(e => logLine(e, "fail"));
     if (dupCount) logLine(`${dupCount}개 중복 항목 건너뜀`, "fail");
-  } catch(e) { logLine("추가 오류: " + e.message, "fail"); }
+    // 하나도 못 넣었으면 사용자에게 눈에 보이게 알린다 (로그 패널은 화면 밖일 수 있음)
+    if (!d.added || !d.added.length) {
+      const reasons = [...(d.skipped || []).map(n => `중복: ${n}`),
+                       ...(d.errors || [])];
+      alert("큐에 추가된 작업이 없습니다.\n" +
+            (reasons.length ? reasons.join("\n") : "이미 처리 중이거나 파일을 찾을 수 없습니다."));
+    }
+  } catch(e) {
+    logLine("추가 오류: " + e.message, "fail");
+    alert("추가 오류: " + e.message);
+  }
   finally { btn.disabled = false; }
 }
 
