@@ -307,17 +307,33 @@ def process_match(video: str, out_dir: Path) -> dict:
         cfg = PipelineConfig(device=device, stride=STRIDE)
         models = resolve_models(device)
 
+        _t1 = time.monotonic()
+        _prog_state = {"stage": None, "calls": 0}
+
+        def _radar_progress(stage, done, total):
+            # 스테이지가 바뀌는 순간마다, 그리고 같은 스테이지 안에서는 10번 호출될
+            # 때마다만 로그(분석 단계는 progress_every=15프레임마다 호출되므로
+            # 10번에 한 번이면 대략 150프레임마다 — 로그가 넘치지 않게).
+            changed = stage != _prog_state["stage"]
+            _prog_state["stage"] = stage
+            _prog_state["calls"] = 0 if changed else _prog_state["calls"] + 1
+            if changed or _prog_state["calls"] % 10 == 0:
+                pct = f" {done}/{total}" if total else ""
+                log(f"[{stem}]   [{stage}]{pct} ({time.monotonic() - _t1:.0f}초 경과)")
+
         if MODE == "full":
             radar_out = out_dir / f"dotplay_full_{stem}.mp4"
             log(f"[{stem}] 원본 전체 2D 변환 중 (시간이 오래 걸릴 수 있음)...")
-            result = run_radar(video, models, cfg, device, out_video=str(radar_out))
+            result = run_radar(video, models, cfg, device, out_video=str(radar_out),
+                               on_progress=_radar_progress)
             final_out = radar_out
         else:
             merged, _ = sh.get_merged_timeline(selected, sh.PRE_SEC, sh.POST_SEC)
             segments = [(c["start"], c["end"]) for c in merged]
             radar_out = out_dir / f"dotplay_radar_{stem}.mp4"
             log(f"[{stem}] 하이라이트 {len(segments)}개 구간만 2D 변환 중...")
-            result = run_radar_segments(video, segments, models, cfg, device, out_video=str(radar_out))
+            result = run_radar_segments(video, segments, models, cfg, device, out_video=str(radar_out),
+                                        on_progress=_radar_progress)
 
             final_out = out_dir / f"highlight_with_dotplay_{stem}.mp4"
             log(f"[{stem}] 하이라이트 + 2D 변환 합성 중 -> {final_out}")
