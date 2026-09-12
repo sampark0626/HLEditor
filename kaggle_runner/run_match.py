@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-HLEditor Kaggle 러너 (v0 — 미검증 초안)
+HLEditor Kaggle 러너 (v1 — 배치 처리)
 =========================================
 
-로컬 서버 없이 Kaggle 커널(GPU) 하나로 "원본 영상 -> 하이라이트 추출
+로컬 서버 없이 Kaggle 커널(GPU) 하나로 "원본 영상들 -> 하이라이트 추출
 -> (하이라이트 구간만, 또는 원본 전체) Dot Play 2D 변환 -> 합성"까지 끝낸다.
+**한 번에 여러 경기를 처리**한다 — Dataset에 영상을 몇 개를 넣든, 코드 수정 없이
+Input에 붙인 Dataset들 아래 있는 영상 파일을 전부 자동으로 찾아 순서대로 처리한다.
 
 HLEditor 레포(soccer_highlights.py, dotplay/)를 그대로 git clone해 재사용한다
 (Flask 의존성이 없는 순수 라이브러리라 그대로 import 가능).
 
-사용법 (제일 쉬운 첫 실행 — Kaggle CLI 없이):
-  1. kaggle.com에서 새 Notebook 생성, 이 파일 내용을 그대로 붙여넣기
-  2. 우측 설정에서: Accelerator = GPU T4, Internet = On
-  3. Add-ons > Secrets 에 GEMINI_API_KEY 등록 (선택: ROBOFLOW_API_KEY)
-  4. Add-ons > Data 에서 원본 경기 영상을 담은 Dataset을 Input으로 추가
-  5. 아래 "사용자 설정" 블록의 MATCH_VIDEO 경로를 실제 파일 경로로 수정
-     (Kaggle 입력 데이터는 보통 /kaggle/input/<데이터셋-slug>/<파일명> 형태)
-  6. Save & Run All (Kaggle이 알아서 백그라운드로 끝까지 실행)
-  7. 끝나면 /kaggle/working/ 아래 산출물을 다운로드
+사용법 (매주 반복하는 루틴 — Kaggle CLI 없이):
+  1. 이번 주 경기 영상들(몇 개든)을 하나의 Kaggle Dataset에 업로드
+     (기존 Dataset에 "새 버전"으로 올려 계속 재사용해도 되고, 새로 만들어도 됨)
+  2. 저장해 둔 노트북을 열고, Input에 그 Dataset이 붙어 있는지 확인
+     (버전만 바뀌었으면 자동 반영됨, 새 Dataset이면 Add Input으로 새로 붙이기)
+  3. **코드는 그대로 두고** Save & Run All — MATCH_VIDEOS를 비워 두면(기본값)
+     Input 아래 영상 파일을 전부 자동으로 찾아 하나씩 처리한다
+  4. 끝나면 /kaggle/working/ 아래 영상별 산출물(highlight_<파일명>.mp4 등)을 다운로드
 
-⚠️ 주의: 이 스크립트는 아직 Kaggle에서 실제로 한 번도 돌려보지 않았다.
-첫 실행에서 에러가 나면 그 로그를 그대로 알려주면 다음 버전에서 고친다.
-특히 아래가 검증되지 않은 지점:
-  - Roboflow에서 로컬 가중치(.pt) export가 무료로 되는지 (안 되면 자동으로
-    기존 REST 방식으로 폴백하지만, 그러면 402 문제가 재발할 수 있음)
-  - Kaggle 기본 이미지의 torch/opencv 버전과 이 프로젝트 의존성의 호환 여부
+특정 영상만 처리하고 싶으면 MATCH_VIDEOS 에 경로 리스트를 직접 채우면 된다.
+
+⚠️ 참고: 영상 하나 처리에 (지난 실행 실측) 하이라이트 추출만 약 15~20분,
+2D 변환까지 하면 더 걸릴 수 있다. 여러 개를 한 번에 돌리면 그만큼 길어지니
+Kaggle 세션 최대 길이(12시간)·주간 GPU 한도(약 30시간)를 감안할 것.
 """
 
 from __future__ import annotations
@@ -37,7 +37,11 @@ import time
 from pathlib import Path
 
 # ── 사용자 설정 ──────────────────────────────────────────────────────────
-MATCH_VIDEO = "/kaggle/input/YOUR-DATASET-SLUG/YOUR-VIDEO.mp4"  # ← 반드시 수정
+# 비워두면(기본) Input에 붙은 모든 Dataset에서 영상 파일을 자동으로 찾아 전부 처리한다.
+# 특정 영상만 처리하려면 경로를 직접 채운다: ["/kaggle/input/.../1-1.mp4", ...]
+MATCH_VIDEOS: list[str] = []
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi"}
+
 MODE = "highlights"     # "highlights"(기본, 구간만 변환) | "full"(원본 전체 변환)
 SENSITIVITY = "normal"  # "wide" | "normal" | "strict"
 STRIDE = 2              # dot-play 프레임 샘플링(2 = 격프레임, 클수록 빠르고 성김)
@@ -132,11 +136,12 @@ def resolve_models(device: str):
     from dotplay.pipeline import ModelSpec
 
     # 1) 자체 학습 가중치 — kaggle_runner/train_weights.py 로 한 번 만들어 두고
-    #    이후로는 이 Dataset을 Input에 붙이기만 하면 된다.
-    for base in Path("/kaggle/input").glob("*"):
-        p, f = base / "player.pt", base / "field.pt"
-        if p.exists() and f.exists():
-            log(f"자체 학습 가중치 발견: {base.name} — 이걸 사용")
+    #    이후로는 이 Dataset을 Input에 붙이기만 하면 된다. (마운트 깊이가
+    #    일정하지 않아 재귀 탐색 — discover_match_videos()와 동일한 이유)
+    for p in Path("/kaggle/input").rglob("player.pt"):
+        f = p.parent / "field.pt"
+        if f.exists():
+            log(f"자체 학습 가중치 발견: {p.parent} — 이걸 사용")
             return ModelSpec(player_weights=str(p), field_weights=str(f))
 
     # 2) 참조 저장소 공개 가중치 (Roboflow 계정 불필요, 기본 권장 경로)
@@ -209,99 +214,150 @@ def composite_pip(main_path, pip_path, out_path, run_fn,
     ])
 
 
-def main() -> None:
-    if not Path(MATCH_VIDEO).exists():
-        raise FileNotFoundError(
-            f"MATCH_VIDEO 경로가 없습니다: {MATCH_VIDEO}\n"
-            "스크립트 상단 MATCH_VIDEO 를 Kaggle Dataset 안의 실제 파일 경로로 바꾸세요."
-        )
-    bootstrap()
+def discover_match_videos() -> list[Path]:
+    """Input에 붙은 모든 Dataset에서 영상 파일을 자동으로 찾는다.
 
+    Kaggle의 Input 마운트 경로 깊이는 상황에 따라 다르다(실측:
+    /kaggle/input/<slug>/<file> 뿐 아니라 /kaggle/input/datasets/<owner>/<slug>/<file>
+    형태도 나옴) — 그래서 깊이를 가정하지 않고 /kaggle/input 전체를 재귀 탐색한다.
+    자체 학습 가중치 Dataset(player.pt+field.pt 들어있는 폴더)은 영상이 아니므로,
+    그 폴더 하위는 전부 제외한다.
+    """
+    root = Path("/kaggle/input")
+    if not root.exists():
+        return []
+    weight_dirs = {p.parent for p in root.rglob("player.pt") if (p.parent / "field.pt").exists()}
+    videos = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTS:
+            continue
+        if any(wd in p.parents for wd in weight_dirs):
+            continue
+        videos.append(p)
+    return videos
+
+
+def process_match(video: str, out_dir: Path) -> dict:
+    """영상 한 편을 처리: 하이라이트 추출 -> (가능하면) 2D 변환 -> 합성.
+
+    out_dir 아래 <영상 이름 stem> 을 파일명에 붙여 저장하므로, 여러 편을
+    한 세션에서 처리해도 서로 산출물을 덮어쓰지 않는다.
+    """
     import soccer_highlights as sh
     from dotplay.config import PipelineConfig
     from dotplay.device import resolve_device
     from dotplay.pipeline import run_radar, run_radar_segments
 
-    work = WORK_DIR / "_work"
-    work.mkdir(exist_ok=True)
+    stem = Path(video).stem
+    work = WORK_DIR / "_work" / stem
+    work.mkdir(parents=True, exist_ok=True)
 
     # ── 1) 하이라이트 추출 (오디오 스파이크 + Gemini 판별) ──────────────
-    log("오디오 스파이크 검출 중...")
-    dur = sh.probe_duration(MATCH_VIDEO)
+    log(f"[{stem}] 오디오 스파이크 검출 중...")
+    dur = sh.probe_duration(video)
     sp = sh.SENSITIVITY_PRESETS[SENSITIVITY]
-    cands = sh.detect_spikes(MATCH_VIDEO, work, percentile=sp["percentile"], min_db=sp["min_db"])
-    log(f"오디오 후보 {len(cands)}개 (영상 길이 {dur/60:.1f}분)")
+    cands = sh.detect_spikes(video, work, percentile=sp["percentile"], min_db=sp["min_db"])
+    log(f"[{stem}] 오디오 후보 {len(cands)}개 (영상 길이 {dur/60:.1f}분)")
 
     gemini_key = get_secret("GEMINI_API_KEY")
     vision_used = False
     if gemini_key and cands:
         from google import genai
         client = genai.Client(api_key=gemini_key)
-        log("Gemini 비전 판별 중...")
-        usage = sh.classify_all_parallel(cands, MATCH_VIDEO, work, client, sh.CONF_AUTO, sh.VISION_WORKERS)
+        log(f"[{stem}] Gemini 비전 판별 중...")
+        usage = sh.classify_all_parallel(cands, video, work, client, sh.CONF_AUTO, sh.VISION_WORKERS)
         vision_used = True
-        log(f"판별 완료 (호출 {usage.get('calls')}회)")
+        log(f"[{stem}] 판별 완료 (호출 {usage.get('calls')}회)")
     else:
-        log("GEMINI_API_KEY 없음 — 비전 판별 생략, 오디오 후보 전체 채택")
+        log(f"[{stem}] GEMINI_API_KEY 없음 — 비전 판별 생략, 오디오 후보 전체 채택")
 
     selected, maybe = sh.select_segments(cands, sh.CONF_AUTO, vision_used)
-    log(f"채택 {len(selected)}개 / 확인필요(자동 제외) {len(maybe)}개")
+    log(f"[{stem}] 채택 {len(selected)}개 / 확인필요(자동 제외) {len(maybe)}개")
     if not selected:
         raise RuntimeError("채택된 하이라이트 구간이 없습니다 — 민감도(SENSITIVITY)를 낮춰 재시도하세요.")
 
-    hl_out = WORK_DIR / "highlight.mp4"
-    log(f"하이라이트 영상 생성 중 (클립 {len(selected)}개 재인코딩) -> {hl_out}")
+    hl_out = out_dir / f"highlight_{stem}.mp4"
+    log(f"[{stem}] 하이라이트 영상 생성 중 (클립 {len(selected)}개 재인코딩) -> {hl_out}")
     _t0 = time.monotonic()
 
     def _build_progress(done, total):
         if done == total or done % 5 == 0:
-            log(f"  클립 인코딩 {done}/{total} ({time.monotonic() - _t0:.0f}초 경과)")
+            log(f"[{stem}]   클립 인코딩 {done}/{total} ({time.monotonic() - _t0:.0f}초 경과)")
 
-    sh.build_output(MATCH_VIDEO, selected, str(hl_out), work, on_progress=_build_progress)
-    log(f"하이라이트 영상 완성 ({time.monotonic() - _t0:.0f}초 소요)")
+    sh.build_output(video, selected, str(hl_out), work, on_progress=_build_progress)
+    log(f"[{stem}] 하이라이트 영상 완성 ({time.monotonic() - _t0:.0f}초 소요)")
 
     # ── 2) Dot Play 2D 변환 (모델을 못 구하면 여기만 건너뛰고 하이라이트는 살린다) ──
     final_out = hl_out
     dotplay_error = None
     try:
         device = resolve_device("auto")
-        log(f"추론 디바이스: {device}")
+        log(f"[{stem}] 추론 디바이스: {device}")
         cfg = PipelineConfig(device=device, stride=STRIDE)
         models = resolve_models(device)
 
         if MODE == "full":
-            radar_out = WORK_DIR / "dotplay_full.mp4"
-            log("원본 전체 2D 변환 중 (시간이 오래 걸릴 수 있음)...")
-            result = run_radar(MATCH_VIDEO, models, cfg, device, out_video=str(radar_out))
+            radar_out = out_dir / f"dotplay_full_{stem}.mp4"
+            log(f"[{stem}] 원본 전체 2D 변환 중 (시간이 오래 걸릴 수 있음)...")
+            result = run_radar(video, models, cfg, device, out_video=str(radar_out))
             final_out = radar_out
         else:
             merged, _ = sh.get_merged_timeline(selected, sh.PRE_SEC, sh.POST_SEC)
             segments = [(c["start"], c["end"]) for c in merged]
-            radar_out = WORK_DIR / "dotplay_radar.mp4"
-            log(f"하이라이트 {len(segments)}개 구간만 2D 변환 중...")
-            result = run_radar_segments(MATCH_VIDEO, segments, models, cfg, device, out_video=str(radar_out))
+            radar_out = out_dir / f"dotplay_radar_{stem}.mp4"
+            log(f"[{stem}] 하이라이트 {len(segments)}개 구간만 2D 변환 중...")
+            result = run_radar_segments(video, segments, models, cfg, device, out_video=str(radar_out))
 
-            final_out = WORK_DIR / "highlight_with_dotplay.mp4"
-            log(f"하이라이트 + 2D 변환 합성 중 -> {final_out}")
+            final_out = out_dir / f"highlight_with_dotplay_{stem}.mp4"
+            log(f"[{stem}] 하이라이트 + 2D 변환 합성 중 -> {final_out}")
             composite_pip(hl_out, radar_out, final_out, sh.run)
 
         if not result.coords.empty:
-            coords_out = WORK_DIR / "coords.parquet"
+            coords_out = out_dir / f"coords_{stem}.parquet"
             result.coords.to_parquet(coords_out)
-            log(f"좌표 저장: {coords_out} ({result.coords['track_id'].nunique()}개 트랙)")
+            log(f"[{stem}] 좌표 저장: {coords_out} ({result.coords['track_id'].nunique()}개 트랙)")
     except Exception as e:
         dotplay_error = repr(e)
-        log(f"2D 변환 단계 실패 — 건너뛰고 하이라이트 영상만 남김: {dotplay_error}")
+        log(f"[{stem}] 2D 변환 단계 실패 — 건너뛰고 하이라이트 영상만 남김: {dotplay_error}")
 
     summary = {
-        "mode": MODE, "sensitivity": SENSITIVITY, "stride": STRIDE,
+        "video": str(video), "mode": MODE, "sensitivity": SENSITIVITY, "stride": STRIDE,
         "duration_sec": dur, "n_candidates": len(cands), "n_selected": len(selected),
         "n_maybe_excluded": len(maybe), "vision_used": vision_used,
         "final_output": str(final_out), "dotplay_error": dotplay_error,
     }
-    (WORK_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
-    log(f"완료! 산출물: {WORK_DIR}")
-    log(json.dumps(summary, ensure_ascii=False, indent=2))
+    (out_dir / f"summary_{stem}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    log(f"[{stem}] 완료 -> {final_out}")
+    return summary
+
+
+def main() -> None:
+    bootstrap()
+
+    videos = [Path(v) for v in MATCH_VIDEOS] or discover_match_videos()
+    missing = [v for v in videos if not v.exists()]
+    if missing:
+        raise FileNotFoundError(f"영상을 찾을 수 없습니다: {missing}")
+    if not videos:
+        raise FileNotFoundError(
+            "처리할 영상이 없습니다 — Input에 경기 영상이 든 Dataset을 붙였는지, "
+            "또는 MATCH_VIDEOS를 직접 채웠는지 확인하세요."
+        )
+    log(f"처리할 영상 {len(videos)}개: {[v.name for v in videos]}")
+
+    results = []
+    for i, video in enumerate(videos, 1):
+        log(f"===== [{i}/{len(videos)}] {video.name} 처리 시작 =====")
+        try:
+            results.append(process_match(str(video), WORK_DIR))
+        except Exception as e:
+            log(f"[{video.name}] 처리 실패 — 다음 영상으로 넘어감: {e!r}")
+            results.append({"video": str(video), "error": repr(e)})
+
+    ok = sum(1 for r in results if not r.get("error"))
+    (WORK_DIR / "batch_summary.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    log(f"===== 배치 완료: {len(videos)}개 중 {ok}개 성공 =====")
+    log(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
