@@ -87,6 +87,8 @@ def bootstrap() -> Path:
     extra = [
         "supervision>=0.24", "pyarrow>=15.0", "google-genai>=2.6,<3",
         "umap-learn>=0.5", "scikit-learn>=1.4", "transformers>=4.44", "timm>=1.0",
+        "ultralytics>=8.3",  # 로컬 .pt 가중치 추론(dotplay/detect.py의 ultralytics 백엔드)에 필요
+        "tqdm>=4.66",  # dotplay/render.py 가 씀 — Kaggle 기본 이미지에 보통 있지만 방어적으로 명시
         "git+https://github.com/roboflow/sports.git",
         "roboflow", "gdown",
     ]
