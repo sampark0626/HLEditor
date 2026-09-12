@@ -40,6 +40,10 @@ from pathlib import Path
 # 비워두면(기본) Input에 붙은 모든 Dataset에서 영상 파일을 자동으로 찾아 전부 처리한다.
 # 특정 영상만 처리하려면 경로를 직접 채운다: ["/kaggle/input/.../1-1.mp4", ...]
 MATCH_VIDEOS: list[str] = []
+# 이미 처리해서 다시 돌리고 싶지 않은 영상의 파일명(확장자 제외, 예: "1-1")을 적어두면
+# MATCH_VIDEOS 자동탐색에서 제외한다. 지난주 Dataset을 Input에서 안 지웠을 때의 안전장치.
+# (가장 확실한 방법은 애초에 매주 새 이름의 Dataset을 쓰고 지난주 것은 Input에서 제거하는 것)
+SKIP_STEMS: set[str] = set()
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi"}
 
 MODE = "highlights"     # "highlights"(기본, 구간만 변환) | "full"(원본 전체 변환)
@@ -227,13 +231,18 @@ def discover_match_videos() -> list[Path]:
     if not root.exists():
         return []
     weight_dirs = {p.parent for p in root.rglob("player.pt") if (p.parent / "field.pt").exists()}
-    videos = []
+    videos, skipped = [], []
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in VIDEO_EXTS:
             continue
         if any(wd in p.parents for wd in weight_dirs):
             continue
+        if p.stem in SKIP_STEMS:
+            skipped.append(p.name)
+            continue
         videos.append(p)
+    if skipped:
+        log(f"SKIP_STEMS로 제외됨(이미 처리한 것으로 표시): {skipped}")
     return videos
 
 
@@ -358,6 +367,10 @@ def main() -> None:
     (WORK_DIR / "batch_summary.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
     log(f"===== 배치 완료: {len(videos)}개 중 {ok}개 성공 =====")
     log(json.dumps(results, ensure_ascii=False, indent=2))
+
+    done_stems = sorted({Path(r["video"]).stem for r in results if r.get("video")})
+    log("같은 Dataset을 다음에도 재사용할 계획이면, 이번에 처리한 영상을 "
+        f"SKIP_STEMS에 넣어 다음 실행에서 건너뛸 수 있습니다: {done_stems}")
 
 
 if __name__ == "__main__":
