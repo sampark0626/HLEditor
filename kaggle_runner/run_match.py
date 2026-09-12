@@ -250,8 +250,15 @@ def main() -> None:
         raise RuntimeError("채택된 하이라이트 구간이 없습니다 — 민감도(SENSITIVITY)를 낮춰 재시도하세요.")
 
     hl_out = WORK_DIR / "highlight.mp4"
-    log(f"하이라이트 영상 생성 중 -> {hl_out}")
-    sh.build_output(MATCH_VIDEO, selected, str(hl_out), work)
+    log(f"하이라이트 영상 생성 중 (클립 {len(selected)}개 재인코딩) -> {hl_out}")
+    _t0 = time.monotonic()
+
+    def _build_progress(done, total):
+        if done == total or done % 5 == 0:
+            log(f"  클립 인코딩 {done}/{total} ({time.monotonic() - _t0:.0f}초 경과)")
+
+    sh.build_output(MATCH_VIDEO, selected, str(hl_out), work, on_progress=_build_progress)
+    log(f"하이라이트 영상 완성 ({time.monotonic() - _t0:.0f}초 소요)")
 
     # ── 2) Dot Play 2D 변환 (모델을 못 구하면 여기만 건너뛰고 하이라이트는 살린다) ──
     final_out = hl_out
