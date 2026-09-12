@@ -80,7 +80,7 @@ def bootstrap() -> Path:
         "supervision>=0.24", "pyarrow>=15.0", "google-genai>=2.6,<3",
         "umap-learn>=0.5", "scikit-learn>=1.4", "transformers>=4.44", "timm>=1.0",
         "git+https://github.com/roboflow/sports.git",
-        "roboflow",
+        "roboflow", "gdown",
     ]
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *extra], check=False)
     return repo_dir
@@ -90,27 +90,64 @@ class ModelsUnavailable(Exception):
     """검출 모델을 어떤 방식으로도 확보하지 못함 — 2D 변환 단계 전체를 건너뛴다."""
 
 
+# roboflow/sports 레포 공식 예제(examples/soccer/setup.sh)가 쓰는 사전학습 가중치.
+# Google Drive 공개 파일이라 Roboflow 계정/API 키/크레딧이 전혀 필요 없다.
+# https://github.com/roboflow/sports/blob/main/examples/soccer/setup.sh
+_GDRIVE_PLAYER_ID = "17PXFNlx-jI7VjVo_vQnB1sONjRyvoB-q"
+_GDRIVE_FIELD_ID = "1Ma5Kt86tgpdjCTKfum79YMgNnSjcoOyf"
+
+
+def _download_reference_weights(weights_dir: Path):
+    """roboflow/sports 공식 예제의 사전학습 가중치를 Google Drive에서 내려받는다.
+
+    Roboflow 계정과 무관 — 무료/유료 플랜, 크레딧 상태와 상관없이 항상 된다.
+    한 번 받으면 WORK_DIR에 남으므로 같은 세션 재실행 시 다시 받지 않는다.
+    """
+    player_pt, field_pt = weights_dir / "player.pt", weights_dir / "field.pt"
+    if player_pt.exists() and field_pt.exists():
+        return player_pt, field_pt
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown"], check=False)
+    import gdown
+    log("참조 저장소(roboflow/sports)의 공개 가중치 다운로드 중 (Roboflow 계정 불필요)...")
+    gdown.download(id=_GDRIVE_PLAYER_ID, output=str(player_pt), quiet=False)
+    gdown.download(id=_GDRIVE_FIELD_ID, output=str(field_pt), quiet=False)
+    if not (player_pt.exists() and field_pt.exists()):
+        raise RuntimeError("gdown 다운로드가 완료됐는데 파일이 없습니다 — Google Drive 접근이 막혔을 수 있음")
+    return player_pt, field_pt
+
+
 def resolve_models(device: str):
     """검출 모델을 우선순위대로 시도한다.
 
-    1) 이미 학습해 둔 로컬 .pt 가중치(WEIGHTS_DATASET로 붙인 입력) — 가장 빠르고 무료
-    2) Roboflow 가중치 export — **무료 플랜은 지원 안 함**(Core 유료 플랜 이상만).
+    1) 이미 학습해 둔 로컬 .pt 가중치(자체 Dataset으로 붙인 입력) — 있으면 최우선
+    2) roboflow/sports 공식 예제의 사전학습 가중치를 Google Drive에서 직접 다운로드
+       — **Roboflow 계정/API 키/크레딧 전혀 불필요**, 기본 경로로 권장
+    3) Roboflow 가중치 export — 무료 플랜은 지원 안 함(Core 유료 플랜 이상만),
        https://docs.roboflow.com/models/model-weights/download-roboflow-model-weights
-       무료 계정이면 이 시도는 실패하는 게 정상이다.
-    3) Roboflow REST 호스팅 추론 — 크레딧 소진 시 402(이전 세션에서 실측)
+    4) Roboflow REST 호스팅 추론 — 크레딧 소진 시 402(이전 세션에서 실측)
 
-    셋 다 안 되면 ModelsUnavailable을 던져 호출부가 2D 변환만 건너뛰고
+    전부 안 되면 ModelsUnavailable을 던져 호출부가 2D 변환만 건너뛰고
     하이라이트 영상은 그대로 완성하게 한다.
     """
     from dotplay.pipeline import ModelSpec
 
     # 1) 자체 학습 가중치 — kaggle_runner/train_weights.py 로 한 번 만들어 두고
-    #    이후로는 이 Dataset을 Input에 붙이기만 하면 된다 (Roboflow 전혀 안 씀).
+    #    이후로는 이 Dataset을 Input에 붙이기만 하면 된다.
     for base in Path("/kaggle/input").glob("*"):
         p, f = base / "player.pt", base / "field.pt"
         if p.exists() and f.exists():
-            log(f"자체 학습 가중치 발견: {base.name} — 이걸 사용 (Roboflow 안 씀)")
+            log(f"자체 학습 가중치 발견: {base.name} — 이걸 사용")
             return ModelSpec(player_weights=str(p), field_weights=str(f))
+
+    # 2) 참조 저장소 공개 가중치 (Roboflow 계정 불필요, 기본 권장 경로)
+    weights_dir = WORK_DIR / "weights"
+    weights_dir.mkdir(exist_ok=True)
+    try:
+        player_pt, field_pt = _download_reference_weights(weights_dir)
+        log("참조 가중치 다운로드 성공 — GPU 로컬 추론 사용 (Roboflow 미사용)")
+        return ModelSpec(player_weights=str(player_pt), field_weights=str(field_pt))
+    except Exception as e:
+        log(f"참조 가중치 다운로드 실패({e!r}) — Roboflow 경로로 폴백")
 
     roboflow_key = get_secret("ROBOFLOW_API_KEY")
     player_model_id = os.environ.get("DOTPLAY_PLAYER_MODEL_ID", "football-players-detection-3zvbc/11")
@@ -126,7 +163,10 @@ def resolve_models(device: str):
             rf = roboflow.Roboflow(api_key=roboflow_key)
             for model_id, dst in ((player_model_id, player_pt), (field_model_id, field_pt)):
                 proj_slug, ver = model_id.split("/")
-                proj = rf.workspace().project(proj_slug)
+                # 이 두 모델은 우리 워크스페이스가 아니라 roboflow/sports가 쓰는
+                # 공개 Universe 워크스페이스(roboflow-jvuqo) 소속이다. 기본
+                # rf.workspace()(내 워크스페이스)로는 project()를 못 찾는다.
+                proj = rf.workspace("roboflow-jvuqo").project(proj_slug)
                 weights_path = proj.version(int(ver)).model.download("pytorch", location=str(weights_dir))
                 if Path(weights_path).is_file():
                     Path(weights_path).rename(dst)

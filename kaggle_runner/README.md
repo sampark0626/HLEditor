@@ -26,17 +26,16 @@
 
 ## 알아둘 것
 
-- **Roboflow 가중치 export는 무료 플랜에서 지원 안 됨**(확인됨 — Core 유료
-  플랜 이상만 가능, [공식 문서](https://docs.roboflow.com/models/model-weights/download-roboflow-model-weights)).
-  REST 호스팅 추론으로 폴백해도 크레딧이 소진돼 있으면 402가 재발할 수 있음.
-  → 그래서 **2D 변환 단계는 모델을 못 구하면 자동으로 건너뛰고, 하이라이트
-  영상까지는 완성**되도록 만들어 뒀다. `summary.json`의 `dotplay_error`를
-  보면 어떤 이유로 건너뛰었는지 알 수 있음.
-- **근본 해결책(진행 중)**: Roboflow의 "공개 데이터셋 다운로드"는 무료다 —
-  이 데이터로 Kaggle GPU에서 직접 YOLO를 한 번 학습해 우리 소유의 `.pt`를
-  만들면 이후로는 Roboflow를 아예 안 거친다. `kaggle_runner/train_weights.py`
-  (준비 중)로 만든 `player.pt`/`field.pt`를 Kaggle Dataset으로 올려 Input에
-  붙이면 `run_match.py`가 자동으로 이 가중치를 최우선으로 사용한다.
+- **해결됨 — Roboflow 계정이 아예 필요 없습니다.** `roboflow/sports`(참고
+  저장소) 공식 예제([setup.sh](https://github.com/roboflow/sports/blob/main/examples/soccer/setup.sh))가
+  검출 가중치를 Google Drive 공개 링크에서 직접 받아 쓰는 걸 확인했습니다.
+  `run_match.py`도 이제 이 방식을 기본 경로로 씁니다 — Roboflow API 키,
+  크레딧, 유료 플랜 전부 무관합니다. Roboflow Secrets는 등록해 두면 좋지만
+  (만약을 위한 최후 폴백) 필수는 아닙니다.
+- 이 가중치 다운로드는 몇백 MB라 첫 실행 때 약간 시간이 걸립니다. 이후
+  같은 세션 재실행에서는 캐시를 재사용합니다(세션이 끝나면 다시 받음 —
+  매번 몇백MB 받는 게 아깝다면 나중에 Kaggle Dataset으로 한 번 캐싱해 두는
+  것도 방법).
 - **소요 시간**: 30분 경기 기준 대략 수십 분(하이라이트 구간만 변환) ~
   수 시간(`MODE="full"`, 원본 전체 변환). Kaggle 무료 한도(GPU 주 30시간)
   안에서 6편/주도 여유 있음.
