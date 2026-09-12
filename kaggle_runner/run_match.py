@@ -86,25 +86,41 @@ def bootstrap() -> Path:
     return repo_dir
 
 
-def resolve_models(device: str):
-    """가능하면 로컬 .pt 가중치(빠르고 무료), 안 되면 Roboflow REST로 폴백.
+class ModelsUnavailable(Exception):
+    """검출 모델을 어떤 방식으로도 확보하지 못함 — 2D 변환 단계 전체를 건너뛴다."""
 
-    football-players-detection / football-field-detection 모델의 실제 가중치
-    export가 무료 계정에서 되는지는 아직 검증 전이다 — 실패하면 이유를 출력하고
-    REST로 넘어간다(단, REST는 크레딧 소진 시 402가 날 수 있음, 이전 세션 참고).
+
+def resolve_models(device: str):
+    """검출 모델을 우선순위대로 시도한다.
+
+    1) 이미 학습해 둔 로컬 .pt 가중치(WEIGHTS_DATASET로 붙인 입력) — 가장 빠르고 무료
+    2) Roboflow 가중치 export — **무료 플랜은 지원 안 함**(Core 유료 플랜 이상만).
+       https://docs.roboflow.com/models/model-weights/download-roboflow-model-weights
+       무료 계정이면 이 시도는 실패하는 게 정상이다.
+    3) Roboflow REST 호스팅 추론 — 크레딧 소진 시 402(이전 세션에서 실측)
+
+    셋 다 안 되면 ModelsUnavailable을 던져 호출부가 2D 변환만 건너뛰고
+    하이라이트 영상은 그대로 완성하게 한다.
     """
     from dotplay.pipeline import ModelSpec
 
-    weights_dir = WORK_DIR / "weights"
-    weights_dir.mkdir(exist_ok=True)
-    player_pt = weights_dir / "player.pt"
-    field_pt = weights_dir / "field.pt"
+    # 1) 자체 학습 가중치 — kaggle_runner/train_weights.py 로 한 번 만들어 두고
+    #    이후로는 이 Dataset을 Input에 붙이기만 하면 된다 (Roboflow 전혀 안 씀).
+    for base in Path("/kaggle/input").glob("*"):
+        p, f = base / "player.pt", base / "field.pt"
+        if p.exists() and f.exists():
+            log(f"자체 학습 가중치 발견: {base.name} — 이걸 사용 (Roboflow 안 씀)")
+            return ModelSpec(player_weights=str(p), field_weights=str(f))
 
     roboflow_key = get_secret("ROBOFLOW_API_KEY")
     player_model_id = os.environ.get("DOTPLAY_PLAYER_MODEL_ID", "football-players-detection-3zvbc/11")
     field_model_id = os.environ.get("DOTPLAY_FIELD_MODEL_ID", "football-field-detection-f07vi/14")
 
-    if roboflow_key and not (player_pt.exists() and field_pt.exists()):
+    # 2) Roboflow 가중치 export (유료 플랜 전용 — 무료면 실패가 정상, 계속 진행)
+    weights_dir = WORK_DIR / "weights"
+    weights_dir.mkdir(exist_ok=True)
+    player_pt, field_pt = weights_dir / "player.pt", weights_dir / "field.pt"
+    if roboflow_key:
         try:
             import roboflow
             rf = roboflow.Roboflow(api_key=roboflow_key)
@@ -112,20 +128,20 @@ def resolve_models(device: str):
                 proj_slug, ver = model_id.split("/")
                 proj = rf.workspace().project(proj_slug)
                 weights_path = proj.version(int(ver)).model.download("pytorch", location=str(weights_dir))
-                Path(weights_path).rename(dst) if Path(weights_path).is_file() else None
-            log("로컬 가중치 export 성공 — GPU 로컬 추론 사용")
+                if Path(weights_path).is_file():
+                    Path(weights_path).rename(dst)
+            if player_pt.exists() and field_pt.exists():
+                log("Roboflow 가중치 export 성공 — GPU 로컬 추론 사용")
+                return ModelSpec(player_weights=str(player_pt), field_weights=str(field_pt))
         except Exception as e:
-            log(f"가중치 export 실패({e!r}) — Roboflow REST 호출로 폴백")
+            log(f"가중치 export 실패(무료 플랜이면 정상): {e!r}")
 
-    if player_pt.exists() and field_pt.exists():
-        return ModelSpec(player_weights=str(player_pt), field_weights=str(field_pt))
+    # 3) REST 호스팅 추론 — 마지막 수단, 크레딧 있어야 동작
+    if roboflow_key:
+        log("Roboflow REST 호스팅 추론으로 시도 (크레딧 소진 시 여기서 실패할 수 있음)")
+        return ModelSpec(player_model_id=player_model_id, field_model_id=field_model_id, api_key=roboflow_key)
 
-    if not roboflow_key:
-        raise RuntimeError(
-            "ROBOFLOW_API_KEY가 없어 로컬 가중치도 REST도 쓸 수 없습니다. "
-            "Kaggle Secrets에 등록하세요."
-        )
-    return ModelSpec(player_model_id=player_model_id, field_model_id=field_model_id, api_key=roboflow_key)
+    raise ModelsUnavailable("검출 모델을 확보할 방법이 없습니다 (자체 가중치 없음, ROBOFLOW_API_KEY 없음)")
 
 
 def composite_pip(main_path, pip_path, out_path, run_fn,
@@ -197,38 +213,44 @@ def main() -> None:
     log(f"하이라이트 영상 생성 중 -> {hl_out}")
     sh.build_output(MATCH_VIDEO, selected, str(hl_out), work)
 
-    # ── 2) Dot Play 2D 변환 ──────────────────────────────────────────────
-    device = resolve_device("auto")
-    log(f"추론 디바이스: {device}")
-    cfg = PipelineConfig(device=device, stride=STRIDE)
-    models = resolve_models(device)
+    # ── 2) Dot Play 2D 변환 (모델을 못 구하면 여기만 건너뛰고 하이라이트는 살린다) ──
+    final_out = hl_out
+    dotplay_error = None
+    try:
+        device = resolve_device("auto")
+        log(f"추론 디바이스: {device}")
+        cfg = PipelineConfig(device=device, stride=STRIDE)
+        models = resolve_models(device)
 
-    if MODE == "full":
-        radar_out = WORK_DIR / "dotplay_full.mp4"
-        log("원본 전체 2D 변환 중 (시간이 오래 걸릴 수 있음)...")
-        result = run_radar(MATCH_VIDEO, models, cfg, device, out_video=str(radar_out))
-        final_out = radar_out
-    else:
-        merged, _ = sh.get_merged_timeline(selected, sh.PRE_SEC, sh.POST_SEC)
-        segments = [(c["start"], c["end"]) for c in merged]
-        radar_out = WORK_DIR / "dotplay_radar.mp4"
-        log(f"하이라이트 {len(segments)}개 구간만 2D 변환 중...")
-        result = run_radar_segments(MATCH_VIDEO, segments, models, cfg, device, out_video=str(radar_out))
+        if MODE == "full":
+            radar_out = WORK_DIR / "dotplay_full.mp4"
+            log("원본 전체 2D 변환 중 (시간이 오래 걸릴 수 있음)...")
+            result = run_radar(MATCH_VIDEO, models, cfg, device, out_video=str(radar_out))
+            final_out = radar_out
+        else:
+            merged, _ = sh.get_merged_timeline(selected, sh.PRE_SEC, sh.POST_SEC)
+            segments = [(c["start"], c["end"]) for c in merged]
+            radar_out = WORK_DIR / "dotplay_radar.mp4"
+            log(f"하이라이트 {len(segments)}개 구간만 2D 변환 중...")
+            result = run_radar_segments(MATCH_VIDEO, segments, models, cfg, device, out_video=str(radar_out))
 
-        final_out = WORK_DIR / "highlight_with_dotplay.mp4"
-        log(f"하이라이트 + 2D 변환 합성 중 -> {final_out}")
-        composite_pip(hl_out, radar_out, final_out, sh.run)
+            final_out = WORK_DIR / "highlight_with_dotplay.mp4"
+            log(f"하이라이트 + 2D 변환 합성 중 -> {final_out}")
+            composite_pip(hl_out, radar_out, final_out, sh.run)
 
-    if not result.coords.empty:
-        coords_out = WORK_DIR / "coords.parquet"
-        result.coords.to_parquet(coords_out)
-        log(f"좌표 저장: {coords_out} ({result.coords['track_id'].nunique()}개 트랙)")
+        if not result.coords.empty:
+            coords_out = WORK_DIR / "coords.parquet"
+            result.coords.to_parquet(coords_out)
+            log(f"좌표 저장: {coords_out} ({result.coords['track_id'].nunique()}개 트랙)")
+    except Exception as e:
+        dotplay_error = repr(e)
+        log(f"2D 변환 단계 실패 — 건너뛰고 하이라이트 영상만 남김: {dotplay_error}")
 
     summary = {
         "mode": MODE, "sensitivity": SENSITIVITY, "stride": STRIDE,
         "duration_sec": dur, "n_candidates": len(cands), "n_selected": len(selected),
         "n_maybe_excluded": len(maybe), "vision_used": vision_used,
-        "final_output": str(final_out),
+        "final_output": str(final_out), "dotplay_error": dotplay_error,
     }
     (WORK_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     log(f"완료! 산출물: {WORK_DIR}")

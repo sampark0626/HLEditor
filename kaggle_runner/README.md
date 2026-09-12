@@ -26,10 +26,17 @@
 
 ## 알아둘 것
 
-- **처음이라 미검증**: 특히 "로컬 가중치(.pt) export"가 무료 계정에서 되는지
-  확인 전. 안 되면 스크립트가 자동으로 Roboflow REST로 폴백하는데, 그 경우
-  이전에 겪은 402(크레딧 소진) 문제가 재발할 수 있음 — 로그를 보고 알려주면
-  다음 버전에서 대응.
+- **Roboflow 가중치 export는 무료 플랜에서 지원 안 됨**(확인됨 — Core 유료
+  플랜 이상만 가능, [공식 문서](https://docs.roboflow.com/models/model-weights/download-roboflow-model-weights)).
+  REST 호스팅 추론으로 폴백해도 크레딧이 소진돼 있으면 402가 재발할 수 있음.
+  → 그래서 **2D 변환 단계는 모델을 못 구하면 자동으로 건너뛰고, 하이라이트
+  영상까지는 완성**되도록 만들어 뒀다. `summary.json`의 `dotplay_error`를
+  보면 어떤 이유로 건너뛰었는지 알 수 있음.
+- **근본 해결책(진행 중)**: Roboflow의 "공개 데이터셋 다운로드"는 무료다 —
+  이 데이터로 Kaggle GPU에서 직접 YOLO를 한 번 학습해 우리 소유의 `.pt`를
+  만들면 이후로는 Roboflow를 아예 안 거친다. `kaggle_runner/train_weights.py`
+  (준비 중)로 만든 `player.pt`/`field.pt`를 Kaggle Dataset으로 올려 Input에
+  붙이면 `run_match.py`가 자동으로 이 가중치를 최우선으로 사용한다.
 - **소요 시간**: 30분 경기 기준 대략 수십 분(하이라이트 구간만 변환) ~
   수 시간(`MODE="full"`, 원본 전체 변환). Kaggle 무료 한도(GPU 주 30시간)
   안에서 6편/주도 여유 있음.
