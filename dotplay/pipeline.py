@@ -415,6 +415,11 @@ def run_radar_segments(
             local_out += 1
             done_global += 1
 
+        seg_st = homog.stats()
+        log.info("[dotplay] 구간 %d/%d 피치 캘리브레이션: 키포인트 %d · 전파 %d · 포기 %d (키포인트 %.0f%%)",
+                 si + 1, len(segments), seg_st["keypoint"], seg_st["propagated"],
+                 seg_st["dropped"], seg_st["keypoint_ratio"] * 100)
+
         if cancelled:
             break
         cum_time += seg_end - seg_start
