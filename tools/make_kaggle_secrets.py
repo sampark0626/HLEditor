@@ -24,6 +24,10 @@ import argparse
 import json
 import secrets
 import sys
+import time
+import webbrowser
+import wsgiref.simple_server
+import wsgiref.util
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -100,6 +104,59 @@ def build_secrets(*, client_id: str, client_secret: str, refresh_token: str, roo
     }
 
 
+_DONE_PAGE = ("<html><body style='font-family:sans-serif;padding:40px'>"
+              "<h2>인증이 끝났습니다.</h2><p>이 창을 닫고 터미널을 확인하세요.</p></body></html>")
+
+
+class _RedirectApp:
+    """Google이 돌려보내는 인증 결과 주소(?code=…)를 받아 둔다."""
+
+    def __init__(self):
+        self.uri = None
+
+    def __call__(self, environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        self.uri = wsgiref.util.request_uri(environ)
+        return [_DONE_PAGE.encode("utf-8")]
+
+
+class _QuietHandler(wsgiref.simple_server.WSGIRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def authorize(flow, timeout_sec: float = 600):
+    """브라우저 동의를 받아 자격 증명을 돌려준다.
+
+    InstalledAppFlow.run_local_server()는 첫 연결 하나만 받고 끝난다. 그래서 크롬의 미리 연결
+    (빈 연결)이나 보안 프로그램의 포트 점검이 먼저 들어오면 동의가 끝나기 전에
+    WSGITimeoutError로 죽는다(2026-09-26 이 PC에서 실제로 발생). 여기서는 빈 연결은
+    무시하고, code나 error가 담긴 요청이 올 때까지 기다린다.
+    """
+    app = _RedirectApp()
+    server = wsgiref.simple_server.make_server("localhost", 0, app, handler_class=_QuietHandler)
+    server.timeout = 5          # handle_request가 5초마다 돌아와 마감 시간을 확인한다
+    try:
+        flow.redirect_uri = f"http://localhost:{server.server_port}/"
+        auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+        print("브라우저가 안 열리면 아래 주소를 직접 여세요:\n" + auth_url + "\n")
+        webbrowser.open(auth_url, new=1)
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            server.handle_request()
+            if app.uri and ("code=" in app.uri or "error=" in app.uri):
+                break
+        else:
+            raise TimeoutError(f"{timeout_sec / 60:.0f}분 안에 브라우저 동의가 끝나지 않았습니다. 다시 실행해 주세요.")
+    finally:
+        server.server_close()
+    if "error=" in app.uri and "code=" not in app.uri:
+        raise RuntimeError(f"Google이 동의를 거절했습니다: {app.uri.split('error=', 1)[1][:80]}")
+    # oauthlib는 https 주소만 받는다 — localhost 되돌림 주소는 google_auth_oauthlib도 이렇게 바꿔 넘긴다
+    flow.fetch_token(authorization_response=app.uri.replace("http", "https", 1))
+    return flow.credentials
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Kaggle 인박스 러너용 hl_secrets.json 만들기")
     ap.add_argument("--kaggle-user", default="", help="Kaggle 아이디(데이터셋 메타데이터·안내문에 사용)")
@@ -122,7 +179,7 @@ def main(argv=None) -> int:
     print("브라우저에서 Google 로그인과 권한 동의를 진행해 주세요 (Drive + YouTube).")
     print("'확인되지 않은 앱' 화면이 나오면 [고급] → [안전하지 않은 페이지로 이동]을 누르면 됩니다.")
     flow = InstalledAppFlow.from_client_secrets_file(client_path, scopes=GOOGLE_SCOPES)
-    creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+    creds = authorize(flow)
     if not creds.refresh_token:
         print("refresh token을 받지 못했습니다. 다시 실행해 주세요.")
         return 1
