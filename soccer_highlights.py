@@ -97,7 +97,30 @@ SENSITIVITY_PRESETS = {
 
 # --- 타이틀 워터마크 (영상 우상단 작은 제목) ---
 TITLE_TEXT     = ""     # 비우면 타이틀 없음. 예: "한울타리 FC 경기영상"
-TITLE_FONT     = r"C:\Windows\Fonts\NanumGothic.ttf"  # 한글 지원 폰트
+# 한글 지원 폰트 후보 — 앞에서부터 존재하는 첫 파일을 쓴다. 나눔고딕이 없는 PC가 있어
+# (폰트가 없으면 build_output이 워터마크를 조용히 생략한다) 맑은 고딕으로 대체한다.
+_TITLE_FONT_CANDIDATES = (
+    [r"C:\Windows\Fonts\NanumGothic.ttf",
+     os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\Windows\Fonts\NanumGothic.ttf"),
+     r"C:\Windows\Fonts\malgun.ttf"]
+    if sys.platform.startswith("win") else
+    ["/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]
+)
+
+
+def _resolve_title_font():
+    """워터마크 폰트 경로. 환경변수/.env의 HL_TITLE_FONT가 최우선(Kaggle 등 리눅스용)."""
+    override = config.get_env("HL_TITLE_FONT")
+    if override:
+        return override
+    for path in _TITLE_FONT_CANDIDATES:
+        if path and os.path.exists(path):
+            return path
+    return _TITLE_FONT_CANDIDATES[0]
+
+
+TITLE_FONT     = _resolve_title_font()
 TITLE_FONTSIZE = 22
 TITLE_MARGIN   = 24     # 우/상단 여백 (px)
 
