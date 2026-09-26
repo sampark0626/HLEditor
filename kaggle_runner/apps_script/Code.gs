@@ -201,7 +201,9 @@ function kaggle_(cfg, method, body) {
 /** 'BUSY' | 'ERROR' | 'COMPLETE' | 'IDLE'(커널이 아직 없거나 취소됨) */
 function kernelStatus_(cfg) {
   var res = kaggle_(cfg, 'GetKernelSessionStatus', {userName: cfg.user, kernelSlug: cfg.slug});
-  if (res.code === 404) return 'IDLE';
+  // 아직 없는 커널을 조회하면 Kaggle은 404가 아니라 403 "Permission 'kernels.get' was denied"로
+  // 답한다(2026-09-26 실측). 토큰이 틀린 경우는 이어지는 push가 자기 오류로 드러낸다.
+  if (res.code === 404 || (res.code === 403 && /kernels\.get/.test(res.text))) return 'IDLE';
   if (res.code !== 200) {
     throw new Error('Kaggle 상태 조회 실패 (HTTP ' + res.code + '): ' + String(res.text).slice(0, 200));
   }

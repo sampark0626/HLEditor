@@ -65,6 +65,11 @@ function makeEnv({files = {}, status = 'COMPLETE', saveResponse = null, bootstra
       env.calls.push({url, opts, body: opts.payload ? JSON.parse(opts.payload) : null});
       if (url.startsWith(KAGGLE + 'GetKernelSessionStatus')) {
         if (env.status === 404) return response(404, {error: 'not found'});
+        if (env.status === 403) {   // 실제 Kaggle: 없는 커널 조회는 403 kernels.get
+          return response(403, {error: {code: 403, message: "Permission 'kernels.get' was denied",
+                                        status: 'PERMISSION_DENIED'}});
+        }
+        if (env.status === 401) return response(401, {error: {code: 401, message: 'Unauthenticated'}});
         return response(200, {status: env.status});
       }
       if (url.startsWith(KAGGLE + 'SaveKernel')) {
@@ -142,6 +147,19 @@ test('커널이 아직 없으면(404) 첫 push로 만든다', () => {
   const env = makeEnv({files: {'01_inbox': [video('a.mp4')]}, status: 404});
   assert.match(env.ctx.tick(), /실행 요청함/);
   assert.strictEqual(env.of(KAGGLE + 'SaveKernel').length, 1);
+});
+
+test('커널이 아직 없을 때 Kaggle이 주는 403(kernels.get)도 "없음"으로 보고 첫 push로 만든다', () => {
+  const env = makeEnv({files: {'01_inbox': [video('a.mp4')]}, status: 403});
+  assert.match(env.ctx.tick(), /실행 요청함/);
+  assert.strictEqual(env.of(KAGGLE + 'SaveKernel').length, 1);
+  assert.match(env.ctx.showStatus(), /IDLE/);
+});
+
+test('다른 인증 오류(401)는 push하지 않고 오류로 알린다', () => {
+  const env = makeEnv({files: {'01_inbox': [video('a.mp4')]}, status: 401});
+  assert.match(env.ctx.tick(), /^오류: Kaggle 상태 조회 실패 \(HTTP 401\)/);
+  assert.strictEqual(env.of(KAGGLE + 'SaveKernel').length, 0);
 });
 
 test('push 직후 10분 동안은 다시 push하지 않는다', () => {
