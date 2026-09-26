@@ -51,6 +51,9 @@
 | `IMPROVEMENT_PLAN.md` | 2026-07 리팩터 계획과 실행 로그 (무엇을 왜 바꿨는지의 상세 기록) |
 | `PRIVACY.md` | BAND API 심사용 개인정보처리방침 |
 | `dotplay/`, `jobs_dotplay.py`, `routes_dotplay.py`, `static/js/dotplay.js` | Dot Play(FM 스타일 2D 버드뷰 변환) 기능 일체 — 자세한 내용은 아래 [Dot Play](#dot-play-fm-스타일-2d-버드뷰-변환--2026-0719-20-통합) 섹션 |
+| `kaggle_runner/` | Kaggle 실행기 — `run_match.py`(수동 배치), `inbox_runner.py`(아이폰 자동 처리)와 그 부품(`grouping`/`stores`/`notify`/`analysis`), `kernel_bootstrap.py`, `apps_script/Code.gs`(+`code_test.js`) — 아래 [아이폰 원스톱 자동화](#아이폰-원스톱-자동화--2026-09-26) 섹션 |
+| `tools/make_kaggle_secrets.py` | 아이폰 자동 처리용 비밀값 파일·Drive 폴더를 만드는 PC용 1회성 도구 |
+| `MOBILE_PLAN.md` | 아이폰 자동화 설계·계획서(결정 근거·실행 로그) |
 
 `soccer_highlights.py` 상단의 **조절 파라미터 블록**(`WIN_SEC` ~ `CONF_MAYBE`)이 동작의 거의 전부를 좌우한다. 로직보다 이 값들을 먼저 본다.
 웹 UI로 실행할 때는 `python app.py`가 진입점이며, 아래 CLI 사용법은 `soccer_highlights.py`를 직접 스크립트로 돌릴 때만 해당한다.
@@ -351,6 +354,69 @@ import된다(`jobs_dotplay._process()` 내부). `app.py`/`routes_dotplay.py`는
 `C:\Users\SKTelecom\skt\fm-dotplay\PLAN.md`에 남아 있다(이 저장소로 이식되기
 전 원본 설계 문서). 코드는 이제 이 프로젝트가 정본이며, fm-dotplay는 참고용
 으로만 남겨둔다.
+
+---
+
+## 아이폰 원스톱 자동화 — 2026-09-26
+
+경기 직후 PC 없이 **아이폰 Drive 앱으로 영상을 `HLEditor/01_inbox`에 올리면** 자동으로 하이라이트를 만들어
+YouTube에 올리고, **ntfy 알림으로 그날의 BAND 글 전체**를 보낸다(사용자는 탭해서 복사 → BAND 붙여넣기).
+설계·결정 근거는 [MOBILE_PLAN.md](MOBILE_PLAN.md), 사용자 설정 절차는
+[kaggle_runner/INBOX_SETUP.md](kaggle_runner/INBOX_SETUP.md).
+
+```
+아이폰 Drive 앱 → Drive HLEditor/01_inbox
+  → Apps Script tick() (5분 트리거, FAST_DAYS=일·월만 매번·그 외 55분 간격) → Kaggle SaveKernel(push=실행)
+  → Kaggle 비공개 커널 hleditor-inbox: kernel_bootstrap.py가 main을 clone → inbox_runner.main()
+     claim(01_inbox→02_processing) → 다운로드 → ffprobe → 경기 묶기 → 병합 → 오디오 후보
+     → [팬 ∥ Gemini] → 채택 → 빌드(워터마크) → YouTube → _state 갱신 → ntfy → 원본 03_done
+```
+
+### 지켜야 할 규칙
+1. **서버가 없다.** 상태는 전부 Drive `_state/`에 JSON으로 둔다 — `claims.json`(파일별 source·시도 횟수·상태),
+   `day_YYYY-MM-DD.json`(그날 게시 목록 → 경기 번호와 BAND 글), `results_*.json`(판별 결과).
+   커널은 한 번에 하나만 돈다(Apps Script가 실행 중이면 push하지 않음) — 그래서 락이 없다.
+2. **비밀값은 Kaggle Secrets가 아니라 비공개 데이터셋 `hl-secrets`의 `hl_secrets.json`.** API로 push한 커널에선
+   `UserSecretsClient`가 동작하지 않는다(kaggle-cli issue #582). 로그에 비밀값을 찍지 않는다(`mask()`).
+3. **날짜는 KST로.** Kaggle 시계는 UTC다. `match_date`는 녹화 시작(`creation_time`) → 없으면 Drive 도착 시각을
+   KST로 바꾼 날짜다. `date.today()` 금지.
+4. **큰 파일은 `/kaggle/working` 밖(임시 폴더)에.** working은 커널 Output으로 저장된다(20GB 한도).
+5. **경기 단위 실패는 격리, 실행 전체 실패는 알림 후 비정상 종료.** 경기 실패 → 원본 `04_failed` + 알림
+   (사용자가 `01_inbox`로 옮기면 재시도, 시도 횟수 초기화). 인증 만료·설정 오류 → `_notify_fatal` 후 예외 →
+   커널 ERROR → Apps Script 연속 실패 3회면 서킷브레이커(`resetBreaker()`로 해제).
+6. **처리 중 죽은 파일은 다음 실행이 되돌린다**(`recover_processing`). 같은 파일로 3번 죽으면 실패로 보낸다.
+7. **YouTube 업로드 실패 시** 하이라이트를 Drive `05_output`에 백업하고 링크를 알린다(원본은 `03_done`).
+8. **완료 알림엔 click을 넣지 않는다** — ntfy iOS는 click이 없으면 탭할 때 본문을 복사한다.
+9. `kernel_bootstrap.py`는 main 브랜치를 매번 clone한다 → **main에 push하면 바로 운영에 반영**된다.
+   Apps Script에 같은 내용의 내장 사본(`BOOTSTRAP_FALLBACK`)이 있어, 바꾸면 둘 다 고친다
+   (`node kaggle_runner/apps_script/code_test.js`가 둘이 같은지 검사한다).
+
+### 경기 묶기 (`kaggle_runner/grouping.py`)
+XbotGo는 30분마다 파일을 자른다. 녹화 시작 순으로 정렬해, 길이 ≥ 29.5분(`SPLIT_MIN_SEC`)인 파일 바로 뒤에
+(앞 시작 + 앞 길이 ± 90초)에 시작한 파일을 잇는다. `creation_time`이 없으면 순서만으로 잇는다.
+마지막 파트가 29.5분 이상이면 다음 파트를 기다리고(최대 `WAIT_NEXT_PART_MIN`=40분), 녹화상 더 늦은 다른
+녹화가 있으면 그 경기는 끝난 것으로 본다. 완결된 경기도 마지막 도착 후 `SETTLE_SEC`=180초를 기다린다.
+**가정: XbotGo 파일에 `creation_time`이 있고 분할이 30:00에서 일어난다 — 실제 폰 업로드 파일로 아직 확인 전.**
+
+### 공용 모듈 변경 (PC 앱과 공유)
+- `youtube_uploader.publish_highlight()` — 썸네일·챕터 설명·업로드. 웹 앱(`routes_auth.upload_job_to_youtube`)과
+  인박스 러너가 같이 쓴다. `make_title()`은 `static/js/build.js`의 `ytTitleFor`와 같은 규칙(JS 쪽은 그대로).
+- `youtube_uploader.TOKEN_FILE`은 `HL_YOUTUBE_TOKEN_FILE`로 바꿀 수 있다(커널은 임시 경로에 토큰을 만든다).
+- `soccer_highlights.TITLE_FONT`는 `HL_TITLE_FONT` → 후보 목록(나눔고딕 → 맑은 고딕 / 리눅스 나눔·Noto) 중
+  존재하는 첫 파일. **이전엔 나눔고딕이 없는 PC에서 워터마크가 조용히 빠졌다**(2026-09-26 확인, 9/6 영상에 없음).
+- `kaggle_runner/analysis.analyze_candidates()` — 팬 분석과 Gemini 판별을 동시에(인박스 러너·run_match 공용).
+  웹 앱의 `jobs._process`는 진행률·취소 때문에 여전히 순차 실행이다.
+
+### 검증 상태 (2026-09-26)
+- ✅ 유닛/통합 테스트: `tests/test_grouping.py`·`test_stores.py`(가짜 Drive: 검색어 해석, Range 이어받기, md5)·
+  `test_inbox_runner.py`(LocalStore로 전체 흐름·실패·복구·보관 정리)·`test_notify.py`·`test_make_kaggle_secrets.py`,
+  Apps Script는 `node kaggle_runner/apps_script/code_test.js`(가짜 Apps Script 환경, 19개 시나리오).
+- ✅ 로컬 E2E(실제 영상, Gemini·YouTube 제외): 9/6 41.7분 경기를 30분+11.7분 두 파일로 잘라(creation_time 부여)
+  6분 경기와 함께 넣음 → 두 파트가 1경기로 병합, 2경기 따로 처리, 워터마크 포함 빌드, BAND 글 누적, 원본 03_done 이동.
+  실측은 MOBILE_PLAN.md 실행 로그 참고.
+- ❌ 실제 Drive·Kaggle·Apps Script·아이폰 환경은 미검증 — 사용자 계정이 필요한 단계(INBOX_SETUP.md 1~6).
+  특히 Kaggle API(SaveKernel/GetKernelSessionStatus의 응답 형식), 폰 업로드 파일의 화질·`creation_time`은
+  첫 시험에서 확인할 것.
 
 ---
 

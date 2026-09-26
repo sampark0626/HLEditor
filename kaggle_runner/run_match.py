@@ -46,7 +46,10 @@ MATCH_VIDEOS: list[str] = []
 SKIP_STEMS: set[str] = set()
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi"}
 
-MODE = "highlights"     # "highlights"(기본, 구간만 변환) | "full"(원본 전체 변환)
+# 2D(Dot Play) 변환은 완성도가 아직 낮아 기본은 끈다. True로 바꾸면 하이라이트 뒤에 2D 변환·합성까지 한다
+# (GPU 가속기 필요, 시간이 오래 걸림). 끄면 무거운 CV 패키지도 설치하지 않는다.
+ENABLE_DOTPLAY = False
+MODE = "highlights"     # 2D 켰을 때: "highlights"(기본, 구간만 변환) | "full"(원본 전체 변환)
 SENSITIVITY = "normal"  # "wide" | "normal" | "strict"
 STRIDE = 2              # dot-play 프레임 샘플링(2 = 격프레임, 클수록 빠르고 성김)
 WORK_DIR = Path("/kaggle/working")
@@ -84,16 +87,27 @@ def bootstrap() -> Path:
     sys.path.insert(0, str(repo_dir))
 
     log("추가 의존성 설치 중 (torch/opencv 등 기본 이미지 것은 건드리지 않음)...")
-    extra = [
-        "supervision>=0.24", "pyarrow>=15.0", "google-genai>=2.6,<3",
-        "umap-learn>=0.5", "scikit-learn>=1.4", "transformers>=4.44", "timm>=1.0",
-        "ultralytics>=8.3",  # 로컬 .pt 가중치 추론(dotplay/detect.py의 ultralytics 백엔드)에 필요
-        "tqdm>=4.66",  # dotplay/render.py 가 씀 — Kaggle 기본 이미지에 보통 있지만 방어적으로 명시
-        "git+https://github.com/roboflow/sports.git",
-        "roboflow", "gdown",
-    ]
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *extra], check=False)
+    install_packages(BASE_PACKAGES + (CV_PACKAGES if ENABLE_DOTPLAY else []))
     return repo_dir
+
+
+# 하이라이트에 필요한 패키지 — 가볍다
+BASE_PACKAGES = ["google-genai>=2.6,<3"]
+# 2D(Dot Play) 변환에만 필요한 패키지 — 무겁다. inbox_runner도 2D 요청이 있을 때 이 목록을 쓴다
+CV_PACKAGES = [
+    "supervision>=0.24", "pyarrow>=15.0",
+    "umap-learn>=0.5", "scikit-learn>=1.4", "transformers>=4.44", "timm>=1.0",
+    "ultralytics>=8.3",  # 로컬 .pt 가중치 추론(dotplay/detect.py의 ultralytics 백엔드)에 필요
+    "tqdm>=4.66",  # dotplay/render.py 가 씀 — Kaggle 기본 이미지에 보통 있지만 방어적으로 명시
+    "git+https://github.com/roboflow/sports.git",
+    "roboflow", "gdown",
+]
+
+
+def install_packages(packages: list[str]) -> None:
+    """이미 맞는 버전이 있으면 pip가 건너뛴다. 실패해도 멈추지 않고 뒤 단계에서 드러나게 둔다."""
+    if packages:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", *packages], check=False)
 
 
 class ModelsUnavailable(Exception):
@@ -249,21 +263,19 @@ def discover_match_videos() -> list[Path]:
 
 
 def process_match(video: str, out_dir: Path) -> dict:
-    """영상 한 편을 처리: 하이라이트 추출 -> (가능하면) 2D 변환 -> 합성.
+    """영상 한 편을 처리: 하이라이트 추출 -> (ENABLE_DOTPLAY면) 2D 변환 -> 합성.
 
     out_dir 아래 <영상 이름 stem> 을 파일명에 붙여 저장하므로, 여러 편을
     한 세션에서 처리해도 서로 산출물을 덮어쓰지 않는다.
     """
     import soccer_highlights as sh
-    from dotplay.config import PipelineConfig
-    from dotplay.device import resolve_device
-    from dotplay.pipeline import run_radar, run_radar_segments
+    from kaggle_runner.analysis import analyze_candidates
 
     stem = Path(video).stem
     work = WORK_DIR / "_work" / stem
     work.mkdir(parents=True, exist_ok=True)
 
-    # ── 1) 하이라이트 추출 (오디오 스파이크 + Gemini 판별) ──────────────
+    # ── 1) 하이라이트 추출 (오디오 스파이크 + [팬 궤적 ∥ Gemini 판별]) ──
     log(f"[{stem}] 오디오 스파이크 검출 중...")
     dur = sh.probe_duration(video)
     sp = sh.SENSITIVITY_PRESETS[SENSITIVITY]
@@ -271,16 +283,14 @@ def process_match(video: str, out_dir: Path) -> dict:
     log(f"[{stem}] 오디오 후보 {len(cands)}개 (영상 길이 {dur/60:.1f}분)")
 
     gemini_key = get_secret("GEMINI_API_KEY")
-    vision_used = False
-    if gemini_key and cands:
-        from google import genai
-        client = genai.Client(api_key=gemini_key)
-        log(f"[{stem}] Gemini 비전 판별 중...")
-        usage = sh.classify_all_parallel(cands, video, work, client, sh.CONF_AUTO, sh.VISION_WORKERS)
-        vision_used = True
-        log(f"[{stem}] 판별 완료 (호출 {usage.get('calls')}회)")
-    else:
+    if not gemini_key:
         log(f"[{stem}] GEMINI_API_KEY 없음 — 비전 판별 생략, 오디오 후보 전체 채택")
+    log(f"[{stem}] 팬 궤적 분석{' + Gemini 비전 판별(동시 실행)' if gemini_key else ''} 중...")
+    info = analyze_candidates(video, work, cands, gemini_key=gemini_key, log=log)
+    vision_used = info["vision_used"]
+    if vision_used:
+        log(f"[{stem}] 판별 완료 (호출 {info['usage'].get('calls')}회, ${info['usage'].get('cost_usd')})")
+    log(f"[{stem}] 팬 궤적: {info['pan']}")
 
     selected, maybe = sh.select_segments(cands, sh.CONF_AUTO, vision_used)
     log(f"[{stem}] 채택 {len(selected)}개 / 확인필요(자동 제외) {len(maybe)}개")
@@ -298,10 +308,39 @@ def process_match(video: str, out_dir: Path) -> dict:
     sh.build_output(video, selected, str(hl_out), work, on_progress=_build_progress)
     log(f"[{stem}] 하이라이트 영상 완성 ({time.monotonic() - _t0:.0f}초 소요)")
 
-    # ── 2) Dot Play 2D 변환 (모델을 못 구하면 여기만 건너뛰고 하이라이트는 살린다) ──
+    # ── 2) Dot Play 2D 변환 (선택) ──────────────────────────────────────
+    if ENABLE_DOTPLAY:
+        final_out, dotplay_error = run_dotplay(video, selected, hl_out, out_dir, stem)
+    else:
+        final_out, dotplay_error = hl_out, None
+        log(f"[{stem}] 2D 변환은 꺼져 있음(ENABLE_DOTPLAY=False) — 하이라이트만 저장")
+
+    summary = {
+        "video": str(video), "mode": MODE if ENABLE_DOTPLAY else "highlights_only",
+        "sensitivity": SENSITIVITY, "stride": STRIDE,
+        "duration_sec": dur, "n_candidates": len(cands), "n_selected": len(selected),
+        "n_maybe_excluded": len(maybe), "vision_used": vision_used, "pan": info["pan"],
+        "final_output": str(final_out), "dotplay_error": dotplay_error,
+    }
+    (out_dir / f"summary_{stem}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    log(f"[{stem}] 완료 -> {final_out}")
+    return summary
+
+
+def run_dotplay(video: str, selected: list, hl_out: Path, out_dir: Path, stem: str):
+    """2D 변환 + 하이라이트 합성. 모델을 못 구하는 등 실패하면 하이라이트만 살린다.
+
+    반환: (최종 산출물 경로, 오류 문자열 또는 None)
+    """
+    import soccer_highlights as sh
+
     final_out = hl_out
     dotplay_error = None
     try:
+        from dotplay.config import PipelineConfig
+        from dotplay.device import resolve_device
+        from dotplay.pipeline import run_radar, run_radar_segments
+
         device = resolve_device("auto")
         log(f"[{stem}] 추론 디바이스: {device}")
         cfg = PipelineConfig(device=device, stride=STRIDE)
@@ -346,16 +385,7 @@ def process_match(video: str, out_dir: Path) -> dict:
     except Exception as e:
         dotplay_error = repr(e)
         log(f"[{stem}] 2D 변환 단계 실패 — 건너뛰고 하이라이트 영상만 남김: {dotplay_error}")
-
-    summary = {
-        "video": str(video), "mode": MODE, "sensitivity": SENSITIVITY, "stride": STRIDE,
-        "duration_sec": dur, "n_candidates": len(cands), "n_selected": len(selected),
-        "n_maybe_excluded": len(maybe), "vision_used": vision_used,
-        "final_output": str(final_out), "dotplay_error": dotplay_error,
-    }
-    (out_dir / f"summary_{stem}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
-    log(f"[{stem}] 완료 -> {final_out}")
-    return summary
+    return final_out, dotplay_error
 
 
 def main() -> None:

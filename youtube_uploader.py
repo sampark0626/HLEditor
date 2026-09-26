@@ -8,7 +8,10 @@ youtube_uploader.py — 축구 하이라이트 YouTube 업로드 모듈
 
 import json
 import logging
+import os
+import re
 import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +21,8 @@ log = logging.getLogger("hl")
 
 # ─── 경로 및 상수 ─────────────────────────────────────────────────────────────
 _BASE = Path(__file__).parent
-TOKEN_FILE = _BASE / "youtube_token.json"
+# HL_YOUTUBE_TOKEN_FILE: Kaggle 인박스 러너처럼 저장소 밖(임시 경로)에 토큰을 두는 실행용
+TOKEN_FILE = Path(config.get_env("HL_YOUTUBE_TOKEN_FILE") or (_BASE / "youtube_token.json"))
 _DEFAULT_SECRETS = _BASE / "client_secrets.json"
 
 SCOPES = [
@@ -267,6 +271,30 @@ def extract_thumbnail(video_path: str, timestamp: float, out_path: str) -> bool:
         return False
 
 
+# ─── 제목 생성 ────────────────────────────────────────────────────────────────
+_HASH_NAME_RE = re.compile(r"^[0-9a-f]{24,}$", re.IGNORECASE)
+
+
+def make_title(base: str, video_name: str, match_date: str, index: int | None = None) -> str:
+    """영상별로 구분되는 YouTube 제목: "베이스 | 영상명 | 날짜[ | 번호]".
+
+    static/js/build.js의 ytTitleFor와 같은 규칙이다(웹 UI는 JS 쪽을 쓴다).
+    - 영상명은 확장자를 뗀다. 해시처럼 생긴 이름(16진수 24자 이상)은 넣지 않는다.
+    - 베이스에 영상명이 이미 들어 있으면 중복해서 넣지 않는다.
+    - index: 같은 날짜 영상이 여러 개일 때 붙이는 번호(None이면 생략).
+    - YouTube 제목 한도에 맞춰 100자로 자른다.
+    """
+    vname = re.sub(r"\.[^.]+$", "", video_name or "")
+    base = (base or "").strip()
+    parts = [base]
+    if vname and not _HASH_NAME_RE.match(vname) and vname not in base:
+        parts.append(vname)
+    parts.append(match_date)
+    if index is not None:
+        parts.append(str(index))
+    return " | ".join(p for p in parts if p)[:100]
+
+
 # ─── 설명 생성 ────────────────────────────────────────────────────────────────
 def generate_description(
     candidates: list,
@@ -403,3 +431,52 @@ def upload_video(
             pass
 
     return yt_url
+
+
+def publish_highlight(
+    output_path: str,
+    source_video: str,
+    candidates: list,
+    approved: list,
+    video_name: str,
+    title: str,
+    privacy: str = "public",
+    pre_sec: float = 8.0,
+    post_sec: float = 5.0,
+    on_progress=None,
+) -> str:
+    """하이라이트 한 편을 썸네일·득점 챕터 설명과 함께 YouTube에 올리고 URL을 반환한다.
+
+    웹 앱(routes_auth.upload_job_to_youtube)과 Kaggle 인박스 러너가 같이 쓴다.
+    썸네일은 승인 구간 중 신뢰도가 가장 높은 후보의 peak 프레임을 원본(source_video)에서 뽑는다.
+    썸네일 추출에 실패해도 업로드는 계속한다.
+    """
+    thumb_path = None
+    try:
+        best = max(
+            (candidates[i] for i in approved if i < len(candidates)),
+            key=lambda c: float(c.get("confidence") or 0),
+            default=None,
+        )
+        if best:
+            tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tf.close()
+            if extract_thumbnail(source_video, float(best.get("peak", 0)), tf.name):
+                thumb_path = tf.name
+            else:
+                _unlink_quiet(tf.name)
+
+        desc = generate_description(candidates, approved, video_name,
+                                    pre_sec=pre_sec, post_sec=post_sec)
+        return upload_video(output_path, title, desc, thumbnail_path=thumb_path,
+                            privacy=privacy, on_progress=on_progress)
+    finally:
+        if thumb_path:
+            _unlink_quiet(thumb_path)
+
+
+def _unlink_quiet(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass

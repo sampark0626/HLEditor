@@ -1,7 +1,13 @@
 # HLEditor Kaggle 러너
 
-로컬 서버 없이 Kaggle GPU 커널 하나로 "하이라이트 추출 → Dot Play 2D 변환 → 합성"까지
-끝내는 스크립트. [run_match.py](run_match.py) 참고.
+> **아이폰에서 올리기만 하면 자동으로 처리되는 흐름**(Drive 인박스 → Kaggle → YouTube → 알림)은
+> 이 문서의 수동 러너와 별개다 → [INBOX_SETUP.md](INBOX_SETUP.md) / [inbox_runner.py](inbox_runner.py).
+> 이 문서는 노트북에 붙여넣어 여러 경기를 한 번에 돌리는 **수동 배치 러너**([run_match.py](run_match.py)) 설명이다.
+
+로컬 서버 없이 Kaggle 커널 하나로 "하이라이트 추출(오디오 + 팬 궤적 ∥ Gemini)"을 하고,
+원하면 "Dot Play 2D 변환 → 합성"까지 끝내는 스크립트.
+**2D 변환은 완성도가 아직 낮아 기본은 꺼져 있다**(`ENABLE_DOTPLAY = False`) — 켜면 GPU 가속기가
+필요하고 무거운 CV 패키지를 설치한다. 끄면 GPU 없이 CPU 커널로 충분하다.
 
 **여러 경기를 한 번에 처리한다.** `MATCH_VIDEOS`를 비워두면(기본값) Input에 붙인
 Dataset 아래 있는 영상 파일을 전부 자동으로 찾아 순서대로 처리한다 — 매주 영상이
@@ -58,12 +64,14 @@ Dataset의 영상을 대상으로 하므로, Dataset을 계속 누적해서 붙�
   — Kaggle 세션 최대 길이(12시간), 주간 GPU 한도(약 30시간) 안에서는 여유 있지만
   시간이 오래 걸리는 작업이라는 점은 감안할 것. 한 영상 처리가 실패해도 나머지는
   계속 진행된다(`batch_summary.json`에 영상별 성공/실패가 남음).
-- **MODE**: 기본 `"highlights"`(하이라이트 구간만 2D 변환, 권장·저비용).
+- **ENABLE_DOTPLAY**: 기본 `False`(하이라이트만). `True`로 바꾸면 2D 변환·합성까지 한다.
+- **MODE** (2D를 켰을 때만 의미 있음): 기본 `"highlights"`(하이라이트 구간만 2D 변환, 권장·저비용).
   특정 경기를 통째로 보고 싶으면 `"full"`로 바꿔 재실행(원본 영상만 있으면
   나중에 언제든 가능).
-- 아직 없는 것: Kaggle API로 업로드~실행~결과회수를 자동화하는 것(지금은
-  수동 클릭 필요), 캐릭터(등번호)별 구분. 이 초안이 한 번 돌아가는 걸
-  확인한 뒤 이어서 붙일 예정.
+- 팬 궤적 보정(+0.10, PC 앱과 같은 3차 신호)이 들어가 있어 PC와 같은 기준으로 채택한다.
+  팬 분석과 Gemini 판별은 동시에 돈다(`kaggle_runner/analysis.py`).
+- 업로드~실행~결과 전달의 자동화는 [inbox_runner.py](inbox_runner.py)(아이폰 자동 처리)가 맡는다.
+  캐릭터(등번호)별 구분은 아직 없다.
 
 ## 처음 실행 후 알려주면 좋은 것
 

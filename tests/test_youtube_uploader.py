@@ -210,3 +210,85 @@ def test_upload_video_refresh_error():
                         assert "YouTube 인증이 만료되었거나 취소되었습니다" in str(exc_info.value)
                         mock_revoke.assert_called_once()
 
+
+
+# ─── make_title (static/js/build.js ytTitleFor와 같은 규칙) ─────────────────
+def test_make_title_joins_base_name_date():
+    assert (yt_up.make_title("한울타리 FC 경기영상", "1경기", "2026-09-27")
+            == "한울타리 FC 경기영상 | 1경기 | 2026-09-27")
+
+
+def test_make_title_strips_extension_and_appends_index():
+    assert (yt_up.make_title("베이스", "2-2경기_13.471.mp4", "2026-09-06", index=2)
+            == "베이스 | 2-2경기_13.471 | 2026-09-06 | 2")
+
+
+def test_make_title_skips_hash_like_name():
+    title = yt_up.make_title("베이스", "74f0754e7a124bf6872acab355529f54.mp4", "2026-09-06")
+    assert title == "베이스 | 2026-09-06"
+
+
+def test_make_title_skips_name_already_in_base():
+    assert yt_up.make_title("1경기 하이라이트", "1경기", "2026-09-27") == "1경기 하이라이트 | 2026-09-27"
+
+
+def test_make_title_without_base_and_truncated():
+    assert yt_up.make_title("", "1경기", "2026-09-27") == "1경기 | 2026-09-27"
+    assert len(yt_up.make_title("가" * 150, "x", "2026-09-27")) == 100
+
+
+# ─── publish_highlight (웹 앱·Kaggle 인박스 러너 공용 업로드 경로) ───────────
+def test_publish_highlight_uses_best_approved_candidate_for_thumbnail():
+    import os
+    from unittest.mock import patch
+
+    cands = [
+        {"peak": 10.0, "confidence": 0.95, "type": "shot"},   # 승인 안 됨 — 신뢰도 높아도 제외
+        {"peak": 20.0, "confidence": 0.70, "type": "shot"},
+        {"peak": 30.0, "confidence": 0.90, "type": "goal", "reason": "선제골"},
+    ]
+    seen = {}
+
+    def fake_thumb(video, ts, out):
+        seen["thumb"] = (video, ts)
+        with open(out, "wb") as f:
+            f.write(b"jpg")
+        return True
+
+    def fake_upload(path, title, desc, thumbnail_path=None, privacy="public", on_progress=None):
+        seen["upload"] = (path, title, desc, privacy)
+        seen["thumb_path"] = thumbnail_path
+        assert thumbnail_path and os.path.exists(thumbnail_path)
+        return "https://youtu.be/abc"
+
+    with patch("youtube_uploader.extract_thumbnail", side_effect=fake_thumb), \
+         patch("youtube_uploader.upload_video", side_effect=fake_upload):
+        url = yt_up.publish_highlight("out.mp4", "src.mp4", cands, [1, 2], "1경기",
+                                      "제목", privacy="unlisted")
+
+    assert url == "https://youtu.be/abc"
+    assert seen["thumb"] == ("src.mp4", 30.0)
+    path, title, desc, privacy = seen["upload"]
+    assert (path, title, privacy) == ("out.mp4", "제목", "unlisted")
+    assert "선제골" in desc and desc.startswith("축구 하이라이트 — 1경기")
+    assert not os.path.exists(seen["thumb_path"])   # 임시 썸네일은 정리된다
+
+
+def test_publish_highlight_continues_without_thumbnail():
+    from unittest.mock import patch
+
+    with patch("youtube_uploader.extract_thumbnail", return_value=False), \
+         patch("youtube_uploader.upload_video", return_value="https://youtu.be/x") as up:
+        url = yt_up.publish_highlight("out.mp4", "src.mp4", [{"peak": 5.0, "confidence": 0.8}],
+                                      [0], "1경기", "제목")
+    assert url == "https://youtu.be/x"
+    assert up.call_args.kwargs["thumbnail_path"] is None
+
+
+def test_publish_highlight_skips_thumbnail_when_nothing_approved():
+    from unittest.mock import patch
+
+    with patch("youtube_uploader.extract_thumbnail") as thumb, \
+         patch("youtube_uploader.upload_video", return_value="https://youtu.be/y"):
+        yt_up.publish_highlight("out.mp4", "src.mp4", [], [], "1경기", "제목")
+    thumb.assert_not_called()

@@ -41,6 +41,10 @@
 | `pan_signal.py` | 카메라 팬 궤적 3차 신호 — phase correlation으로 팬 속도/위치 추정, 후보 신뢰도 보정 |
 | `youtube_uploader.py` | YouTube OAuth 2.0 · 영상 업로드 · 썸네일 추출 · 챕터 설명 생성 |
 | `band_poster.py` | BAND OAuth 2.0 · 날짜별 게시글 작성 |
+| `kaggle_runner/inbox_runner.py` | **아이폰 자동 처리** — Drive `01_inbox`에 올린 영상을 Kaggle에서 처리해 YouTube 업로드 + ntfy 알림 |
+| `kaggle_runner/apps_script/Code.gs` | 아이폰 자동 처리의 실행 스위치(Google Apps Script) — 인박스에 영상이 있으면 Kaggle 커널 실행 |
+| `kaggle_runner/run_match.py` | Kaggle 노트북에 붙여넣어 쓰는 수동 배치 러너 (2D 변환은 `ENABLE_DOTPLAY`로 선택) |
+| `tools/make_kaggle_secrets.py` | 아이폰 자동 처리용 비밀값(`hl_secrets.json`)과 Drive 폴더를 만드는 1회용 도구 |
 | `templates/index.html` | 웹 UI 뼈대 (큐 관리 / 리뷰 / 영상 생성 3탭) |
 | `static/css/app.css` | 웹 UI 스타일 |
 | `static/js/*.js` | 웹 UI 로직 (state·utils·queue·review·build·pipeline·notify·main) |
@@ -165,6 +169,22 @@ python app.py
 5. YouTube 업로드 완료 후 **BAND에 게시** → 같은 날짜 영상 링크를 한 게시글에 묶어 게시
 6. 파이프라인 요약 바에서 생성·업로드·게시 진행 상황 한눈에 확인
 7. 제목·파일명 입력 중에는 자동 새로고침으로 커서 위치가 흐트러지지 않습니다
+
+---
+
+## 아이폰 자동 처리 (PC 없이)
+
+경기가 끝나고 **아이폰 Drive 앱으로 영상을 `HLEditor/01_inbox`에 올리기만 하면**, Kaggle이 자동으로
+병합(30분 분할 파트) → 오디오 후보 → 팬 궤적·Gemini 판별 → 빌드 → YouTube 업로드까지 하고,
+**ntfy 알림으로 그날의 BAND 글 전체**를 보내 줍니다. 알림에서 메시지를 탭해 복사하고 BAND에 붙여넣으면 끝입니다.
+
+- 서버·웹호스팅 없음: Google Drive(업로드) + Google Apps Script(실행 스위치) + Kaggle(처리) + ntfy(알림)
+- 확인 주기: 일·월요일 5분마다, 그 외 1시간마다 (`FAST_DAYS`로 변경)
+- 검토 단계 없이 AI 판단(`CONF_AUTO` + 팬 보정)으로 채택. 2D 변환은 `01_inbox_2d`에 올린 경기만
+- 비용: Gemini 경기당 약 $0.10~0.14 (PC 처리와 동일)
+
+처음 한 번 설정(약 40분)은 [kaggle_runner/INBOX_SETUP.md](kaggle_runner/INBOX_SETUP.md)를 따라 하세요.
+설계 배경은 [MOBILE_PLAN.md](MOBILE_PLAN.md)에 있습니다.
 
 ---
 

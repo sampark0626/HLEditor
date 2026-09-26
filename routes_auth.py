@@ -3,7 +3,6 @@
 
 import logging
 import os
-import tempfile
 import threading
 
 from flask import Blueprint, jsonify, redirect, request
@@ -91,42 +90,20 @@ def upload_job_to_youtube(jid: str, title: str, privacy: str):
     jobs.update(jid, yt_status="uploading", yt_progress={"done": 0, "total": 0}, yt_error=None)
     log.info("[%s] YouTube 업로드 시작: %s", jid, title)
 
-    thumb_path = None
     try:
-        # 썸네일 추출: 가장 신뢰도 높은 승인 후보
-        approved = job.get("approved") or []
-        cands     = job.get("candidates") or []
-        if approved and cands and HAS_YT:
-            best = max(
-                (cands[i] for i in approved if i < len(cands)),
-                key=lambda c: float(c.get("confidence") or 0),
-                default=None,
-            )
-            if best:
-                tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                tf.close()
-                peak = float(best.get("peak", 0))
-                if yt_up.extract_thumbnail(job["video"], peak, tf.name):
-                    thumb_path = tf.name
-                else:
-                    try: os.unlink(tf.name)
-                    except Exception: pass
-
-        # 설명 생성
         import soccer_highlights as sh
-        desc = yt_up.generate_description(
-            cands, approved, job["video_name"],
-            pre_sec=job.get("pre_sec", sh.PRE_SEC),
-            post_sec=job.get("post_sec", sh.POST_SEC)
-        )
 
         def _on_prog(done, total):
             jobs.update(jid, yt_progress={"done": done, "total": total})
 
-        yt_url = yt_up.upload_video(
-            output, title, desc,
-            thumbnail_path=thumb_path,
+        # 썸네일(최고 신뢰 승인 후보)·득점 챕터 설명·업로드는 Kaggle 인박스 러너와 같은 경로를 쓴다
+        yt_url = yt_up.publish_highlight(
+            output, job["video"],
+            job.get("candidates") or [], job.get("approved") or [],
+            job["video_name"], title,
             privacy=privacy,
+            pre_sec=job.get("pre_sec", sh.PRE_SEC),
+            post_sec=job.get("post_sec", sh.POST_SEC),
             on_progress=_on_prog,
         )
         jobs.update(jid, yt_status="done", yt_url=yt_url, yt_progress={"done": 1, "total": 1})
@@ -135,10 +112,6 @@ def upload_job_to_youtube(jid: str, title: str, privacy: str):
         msg = str(e)[:300]
         jobs.update(jid, yt_status="error", yt_error=msg)
         log.exception("[%s] YouTube 업로드 실패", jid)
-    finally:
-        if thumb_path and os.path.exists(thumb_path):
-            try: os.unlink(thumb_path)
-            except Exception: pass
 
 
 @bp_auth.route("/api/jobs/<jid>/upload-youtube", methods=["POST"])

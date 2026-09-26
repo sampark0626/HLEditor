@@ -55,3 +55,7 @@ results*.json
 *.wav
 *.png
 app.log
+
+# Kaggle 인박스 러너 비밀값 (tools/make_kaggle_secrets.py 산출물 — 절대 커밋 금지)
+kaggle_secrets/
+hl_secrets.json

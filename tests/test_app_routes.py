@@ -180,3 +180,46 @@ def test_api_job_add_manual_candidate(client):
     assert len(jobs.JOBS[jid]["candidates"]) == 2
     assert jobs.JOBS[jid]["candidates"][1]["peak"] == 30.0
     assert jobs.JOBS[jid]["approved"] == [0, 1]
+
+
+def test_upload_job_to_youtube_uses_shared_publish_path(client, monkeypatch, tmp_path):
+    """웹 앱 업로드는 Kaggle 인박스 러너와 같은 youtube_uploader.publish_highlight를 쓴다."""
+    import routes_auth
+
+    out = tmp_path / "hl.mp4"
+    out.write_bytes(b"mp4")
+    jid = _make_ready_job()
+    with jobs.JLOCK:
+        jobs.JOBS[jid].update(output=str(out), approved=[0], pre_sec=6.0, post_sec=4.0)
+    seen = {}
+
+    def fake_publish(output, source, cands, approved, video_name, title, **kw):
+        seen.update(output=output, source=source, approved=approved, title=title, **kw)
+        kw["on_progress"](50, 100)
+        return "https://youtu.be/web"
+
+    monkeypatch.setattr(routes_auth.yt_up, "publish_highlight", fake_publish)
+    routes_auth.upload_job_to_youtube(jid, "제목", "unlisted")
+    job = jobs.JOBS[jid]
+    assert (job["yt_status"], job["yt_url"]) == ("done", "https://youtu.be/web")
+    assert seen["output"] == str(out) and seen["source"] == job["video"]   # 썸네일은 원본에서
+    assert (seen["approved"], seen["title"], seen["privacy"]) == ([0], "제목", "unlisted")
+    assert (seen["pre_sec"], seen["post_sec"]) == (6.0, 4.0)
+
+
+def test_upload_job_to_youtube_records_error(client, monkeypatch, tmp_path):
+    import routes_auth
+
+    out = tmp_path / "hl.mp4"
+    out.write_bytes(b"mp4")
+    jid = _make_ready_job()
+    with jobs.JLOCK:
+        jobs.JOBS[jid]["output"] = str(out)
+
+    def boom(*a, **k):
+        raise RuntimeError("YouTube 인증이 만료되었거나 취소되었습니다.")
+
+    monkeypatch.setattr(routes_auth.yt_up, "publish_highlight", boom)
+    routes_auth.upload_job_to_youtube(jid, "제목", "public")
+    assert jobs.JOBS[jid]["yt_status"] == "error"
+    assert "인증이 만료" in jobs.JOBS[jid]["yt_error"]
