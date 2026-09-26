@@ -68,9 +68,13 @@ py -3 tools/make_kaggle_secrets.py --kaggle-user <Kaggle 아이디>
 3. 왼쪽 **⚙ 프로젝트 설정 → 스크립트 속성**에 `apps_script_properties.txt`의 값을 한 줄씩 넣습니다.
    `KAGGLE_API_TOKEN`에는 3단계에서 만든 토큰을 넣습니다.
 4. 편집기 위쪽 함수 목록에서 **`installTrigger`**를 고르고 **실행**을 누릅니다. 권한 승인 창이 뜨면 허용합니다.
+   "확인되지 않은 앱"이 나오면 **고급 → (안전하지 않음)으로 이동**을 누릅니다(내가 만든 스크립트라 정상).
    이제 5분마다 확인이 돌아갑니다(일·월요일 외에는 1시간에 한 번만 실제로 확인합니다).
-5. (선택) 함수 목록에서 `showStatus`를 실행해 보면 Kaggle 연결을 확인할 수 있습니다.
-   처음엔 커널이 없어서 `IDLE`이 정상입니다.
+5. 함수 목록에서 **`showStatus`**를 실행합니다. 실행 로그에 `Kaggle 커널 상태: IDLE`이 나오면 Kaggle 연결은 정상입니다.
+   처음엔 커널이 없어서 IDLE이 맞습니다. 오류가 나면 `KAGGLE_USERNAME`과 `KAGGLE_API_TOKEN`을 확인합니다.
+6. 함수 목록에서 **`testPush`**를 실행합니다. 영상 없이 Kaggle 커널을 한 번 돌려 보는 시험입니다.
+   2~5분 뒤 kaggle.com → Code → **hleditor-inbox** → 최신 버전의 로그 끝에 `끝 — 경기 0개`가 보이면
+   GitHub 코드 받기, 비밀값 데이터셋, Google 인증, Drive 폴더까지 모두 정상입니다.
 
 ## 5. 아이폰 (5분)
 

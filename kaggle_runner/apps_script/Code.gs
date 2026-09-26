@@ -43,18 +43,24 @@ var BOOTSTRAP_FALLBACK = [
   ''
 ].join('\n');
 
-/** 시간 트리거와 실행 링크가 부르는 진입점. 오류는 로그로만 남기고 문자열로 돌려준다. */
+/** 시간 트리거와 실행 링크가 부르는 진입점. 결과는 실행 기록(로그)에 남기고 문자열로 돌려준다. */
 function tick(opts) {
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return '다른 확인이 진행 중입니다';
+  if (!lock.tryLock(30000)) return log_('다른 확인이 진행 중입니다');
   try {
-    return tick_(!!(opts && opts.force === true));
+    return log_(tick_(!!(opts && opts.force === true)));
   } catch (e) {
     console.error(e);
     return '오류: ' + (e && e.message ? e.message : e);
   } finally {
     lock.releaseLock();
   }
+}
+
+/** 편집기에서 함수를 실행하면 반환값은 안 보이고 로그만 보이므로, 결과를 로그에도 남긴다. */
+function log_(msg) {
+  console.log(msg);
+  return msg;
 }
 
 function tick_(force) {
@@ -108,24 +114,26 @@ function installTrigger() {
     if (t.getHandlerFunction() === 'tick') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(5).create();
-  return '5분 간격 트리거를 설치했습니다';
+  return log_('5분 간격 트리거를 설치했습니다');
 }
 
 function resetBreaker() {
   var props = PropertiesService.getScriptProperties();
   props.setProperty('ERROR_STREAK', '0');
   props.deleteProperty('BREAKER_NOTIFIED');
-  return '자동 실행을 다시 켰습니다';
+  return log_('자동 실행을 다시 켰습니다');
 }
 
-/** 편집기에서 수동 확인용: 커널 상태 */
+/** 편집기에서 수동 확인용: Kaggle 연결과 커널 상태 (처음엔 커널이 없어서 IDLE이 정상) */
 function showStatus() {
-  return kernelStatus_(readConfig_(PropertiesService.getScriptProperties()));
+  return log_('Kaggle 커널 상태: ' + kernelStatus_(readConfig_(PropertiesService.getScriptProperties())));
 }
 
-/** 편집기에서 수동 확인용: 인박스와 상관없이 CPU로 한 번 실행 */
+/** 편집기에서 수동 확인용: 인박스와 상관없이 CPU로 한 번 실행 — 영상이 없어도 연결 전체를 시험한다 */
 function testPush() {
-  return JSON.stringify(pushKernel_(readConfig_(PropertiesService.getScriptProperties()), false));
+  var res = pushKernel_(readConfig_(PropertiesService.getScriptProperties()), false);
+  return log_('Kaggle 실행 요청 성공: ' + JSON.stringify(res) +
+              '\nkaggle.com → Code → hleditor-inbox 에서 2~5분 뒤 로그를 확인하세요.');
 }
 
 // ─── 내부 함수 ───────────────────────────────────────────────────────────
