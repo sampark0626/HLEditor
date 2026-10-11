@@ -8,6 +8,8 @@
  *   필수  KAGGLE_USERNAME, KAGGLE_API_TOKEN, ROOT_FOLDER_ID, NTFY_TOPIC
  *   선택  KERNEL_SLUG (기본 hleditor-inbox), SECRETS_DATASET (기본 hl-secrets),
  *         FAST_DAYS (기본 "7,1" — 1=월 … 7=일, 이 요일엔 5분마다·나머지는 1시간마다 확인),
+ *         NOTIFY_START (1이면 Kaggle을 시작할 때 "처리 시작" 알림도 보낸다. 기본 꺼짐 —
+ *         영상을 여러 개 올리는 중에 일찍 오면 다 올라간 줄 알고 헷갈리기 때문),
  *         KICK_KEY (실행 링크 doGet을 배포할 때만)
  *
  * 처음 한 번 installTrigger()를 실행하면 5분 간격 트리거가 걸린다.
@@ -95,9 +97,13 @@ function tick_(force) {
   var useGpu = counts.inbox2d > 0;
   pushKernel_(cfg, useGpu);
   props.setProperty('LAST_PUSH_AT', String(now.getTime()));
-  notify_(cfg, '영상 ' + total + '개 확인 — 처리 시작',
-          '경기당 약 25분 뒤 완료 알림이 옵니다.' +
-          (useGpu ? '\n2D 변환 요청이 있어 GPU로 실행합니다.' : ''), ['soccer']);
+  // 업로드가 아직 진행 중일 수 있어 "영상 N개 확인"은 기본으로 보내지 않는다 — 알림은 처리가
+  // 다 끝난 뒤 러너가 한 통만 보낸다. 필요하면 NOTIFY_START=1.
+  if (cfg.notifyStart) {
+    notify_(cfg, '영상 ' + total + '개 확인 — 처리 시작',
+            '올린 영상을 모두 처리한 뒤 완료 알림이 한 번 옵니다.' +
+            (useGpu ? '\n2D 변환 요청이 있어 GPU로 실행합니다.' : ''), ['soccer']);
+  }
   return '영상 ' + total + '개 발견 — Kaggle 실행 요청함' + (useGpu ? ' (GPU)' : '');
 }
 
@@ -149,6 +155,7 @@ function readConfig_(props) {
     topic: p.NTFY_TOPIC,
     slug: p.KERNEL_SLUG || 'hleditor-inbox',
     secretsDataset: p.SECRETS_DATASET || 'hl-secrets',
+    notifyStart: /^(1|true|yes|on)$/i.test(String(p.NOTIFY_START || '').trim()),
     fastDays: String(p.FAST_DAYS || '7,1').split(',')
       .map(function (s) { return Number(s.trim()); })
       .filter(function (n) { return n >= 1 && n <= 7; })

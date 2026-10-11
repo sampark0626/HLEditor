@@ -107,7 +107,7 @@ test('인박스가 비면 아무 API도 부르지 않는다', () => {
   assert.strictEqual(env.calls.length, 0);
 });
 
-test('영상이 있고 커널이 쉬고 있으면 CPU로 push하고 시작 알림을 보낸다', () => {
+test('영상이 있고 커널이 쉬고 있으면 CPU로 push한다(시작 알림은 기본으로 보내지 않는다)', () => {
   const env = makeEnv({files: {'01_inbox': [video('a.MP4'), video('b.mov'), {name: 'note.txt'}]}});
   const msg = env.ctx.tick();
   assert.match(msg, /영상 2개 발견/);
@@ -123,10 +123,24 @@ test('영상이 있고 커널이 쉬고 있으면 CPU로 push하고 시작 알�
   assert.strictEqual(push.body.machineShape, undefined);
   assert.deepStrictEqual(push.body.datasetDataSources, ['me/hl-secrets']);
   assert.match(push.body.text, /from github/);
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 0);   // 업로드가 진행 중일 수 있어 일찍 알리지 않는다
+  assert.strictEqual(env.props.LAST_PUSH_AT, String(SUNDAY_NOON));
+});
+
+test('NOTIFY_START=1이면 push할 때 시작 알림도 보낸다', () => {
+  const env = makeEnv({files: {'01_inbox': [video('a.MP4'), video('b.mov')]}, props: {NOTIFY_START: '1'}});
+  env.ctx.tick();
   const note = env.of('https://ntfy.sh/')[0];
   assert.strictEqual(note.body.topic, 'hl-topic');
   assert.match(note.body.title, /영상 2개 확인/);
-  assert.strictEqual(env.props.LAST_PUSH_AT, String(SUNDAY_NOON));
+});
+
+test('NOTIFY_START가 0이거나 비어 있으면 시작 알림이 없다', () => {
+  for (const v of ['0', '', 'off']) {
+    const env = makeEnv({files: {'01_inbox': [video('a.mp4')]}, props: {NOTIFY_START: v}});
+    env.ctx.tick();
+    assert.strictEqual(env.of('https://ntfy.sh/').length, 0, 'NOTIFY_START=' + JSON.stringify(v));
+  }
 });
 
 test('01_inbox_2d에 영상이 있으면 GPU로 push한다', () => {

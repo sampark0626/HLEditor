@@ -18,12 +18,20 @@ T0 = datetime(2026, 9, 27, 3, 0, tzinfo=UTC)      # 2026-09-27(일) 12:00 KST �
 class Clock:
     def __init__(self, start):
         self.t = start
+        self.timers = []      # (시각, 함수) — sleep으로 시간이 흐르다 그 시각이 되면 실행(업로드 도착 흉내)
 
     def now(self):
         return self.t
 
+    def after(self, minutes, fn):
+        self.timers.append((self.t + timedelta(minutes=minutes), fn))
+
     def sleep(self, sec):
         self.t += timedelta(seconds=sec)
+        due = [fn for at, fn in self.timers if at <= self.t]
+        self.timers = [(at, fn) for at, fn in self.timers if at > self.t]
+        for fn in due:
+            fn()
 
 
 class _Ok:
@@ -128,14 +136,14 @@ def test_split_game_and_single_game_are_processed_in_recording_order(h):
     assert h.files("done") == ["g2.mp4", "p1.mp4", "p2.mp4"]
     assert h.files("inbox") == [] and h.files("processing") == []
 
-    done = [n for n in h.notes if "하이라이트 완료" in n["title"]]
-    assert [n["title"] for n in done] == ["1경기 하이라이트 완료 (오늘 1개)",
-                                          "2경기 하이라이트 완료 (오늘 2개)"]
-    assert "나뉜 파일 2개를 한 경기로 합쳤습니다" in done[0]["message"]
-    last = done[1]["message"]                                   # 그날 BAND 글 전체
-    assert "2026년 09월 27일" in last
-    assert "https://youtu.be/1경기" in last and "https://youtu.be/2경기" in last
-    assert "click" not in done[1]                               # 탭하면 복사되도록
+    assert len(h.notes) == 1                                    # 경기마다가 아니라 한 통
+    note = h.notes[0]
+    assert note["title"] == "하이라이트 2경기 완료 (영상 3개 처리)"
+    msg = note["message"]                                       # 그날 BAND 글 전체
+    assert "2026년 09월 27일" in msg
+    assert "https://youtu.be/1경기" in msg and "https://youtu.be/2경기" in msg
+    assert "※ 1경기: 나뉜 파일 2개를 한 경기로 합쳤습니다" in msg
+    assert "click" not in note                                  # 탭하면 복사되도록
 
     day = h.store.read_json("day_2026-09-27.json")
     assert [g["label"] for g in day["games"]] == ["1경기", "2경기"]
@@ -151,7 +159,8 @@ def test_label_continues_from_earlier_run_same_day(h):
     h.add("g.mp4", 1500, start_min=90)
     h.run()
     assert h.published[0]["label"] == "2경기"
-    assert "https://youtu.be/old" in h.notes[-1]["message"]
+    assert len(h.notes) == 1
+    assert "https://youtu.be/old" in h.notes[0]["message"]      # 이전 실행의 경기도 같은 글에 들어간다
 
 
 def test_only_approved_candidates_are_passed_to_youtube(h):
@@ -166,7 +175,9 @@ def test_too_short_video_goes_to_failed(h):
     h.add("clip.mp4", 100, start_min=0)
     h.run()
     assert h.files("failed") == ["clip.mp4"]
-    assert h.notes[0]["title"] == "처리 실패: clip.mp4"
+    assert h.notes[0]["title"] == "올라간 하이라이트 없음 · 확인 필요 1건 (영상 1개 처리)"
+    assert h.notes[0]["tags"] == ["warning"]
+    assert "처리 실패 — clip.mp4" in h.notes[0]["message"]
     assert "너무 짧아" in h.notes[0]["message"] and "04_failed" in h.notes[0]["message"]
     assert h.published == []
 
@@ -175,7 +186,8 @@ def test_no_highlights_still_takes_a_game_number(h):
     h.verdict = lambda c: {"highlight": False, "confidence": 0.2, "type": "other"}
     h.add("quiet.mp4", 1500, start_min=0)
     h.run()
-    assert h.notes[0]["title"] == "1경기: 하이라이트 없음"
+    assert h.notes[0]["title"] == "올라간 하이라이트 없음 · 확인 필요 1건 (영상 1개 처리)"
+    assert "※ 1경기: 하이라이트 없음" in h.notes[0]["message"]
     assert h.files("done") == ["quiet.mp4"] and h.published == []
     assert h.store.read_json("day_2026-09-27.json")["games"][0]["yt_url"] is None
 
@@ -185,9 +197,10 @@ def test_youtube_failure_backs_up_to_drive_and_says_how_to_fix_auth(h):
     h.add("g.mp4", 1500, start_min=0)
     h.run()
     note = h.notes[0]
-    assert note["title"] == "1경기 YouTube 업로드 실패"
+    assert note["title"] == "올라간 하이라이트 없음 · 확인 필요 1건 (영상 1개 처리)"
+    assert "※ 1경기: YouTube 업로드 실패" in note["message"]
     assert "make_kaggle_secrets.py" in note["message"]
-    assert note["click"].endswith("highlight_2026-09-27_1경기.mp4")
+    assert "highlight_2026-09-27_1경기.mp4" in note["message"]   # Drive 백업 링크(click 대신 본문에)
     assert h.files("output") == ["highlight_2026-09-27_1경기.mp4"]
     assert h.files("done") == ["g.mp4"]
 
@@ -200,6 +213,10 @@ def test_processing_error_fails_that_game_and_continues(h):
     assert h.files("failed") == ["bad.mp4"] and h.files("done") == ["good.mp4"]
     assert "ffmpeg 실패" in summary["failed"][0]["reason"]
     assert [p["label"] for p in h.published] == ["1경기"]      # 실패한 경기는 번호를 쓰지 않음
+    assert len(h.notes) == 1                                    # 성공과 실패가 한 통에 같이 온다
+    assert h.notes[0]["title"] == "하이라이트 1경기 완료 · 확인 필요 1건 (영상 2개 처리)"
+    assert h.notes[0]["tags"] == ["soccer", "warning"]
+    assert "https://youtu.be/1경기" in h.notes[0]["message"] and "처리 실패 — bad.mp4" in h.notes[0]["message"]
 
 
 def test_quality_warning_is_appended(h):
@@ -212,7 +229,7 @@ def test_head_part_waits_for_next_part_then_times_out(h):
     h.add("head.mp4", 1800, start_min=0, arrived=h.clock.now())
     h.run()
     note = h.notes[0]
-    assert note["title"].startswith("1경기 하이라이트 완료")
+    assert note["title"].startswith("하이라이트 1경기 완료")
     assert "다음 파트가 오지 않아" in note["message"]
     assert h.clock.now() - (T0 + timedelta(hours=3)) >= timedelta(minutes=40)
 
@@ -291,8 +308,9 @@ def test_2d_failure_only_notifies(tmp_path, monkeypatch):
     monkeypatch.setattr(rm, "install_packages", lambda pkgs: (_ for _ in ()).throw(RuntimeError("pip 실패")))
     h.add("two_d.mp4", 1500, start_min=0, folder="inbox_2d")
     h.run()
-    titles = [n["title"] for n in h.notes]
-    assert titles == ["1경기 하이라이트 완료 (오늘 1개)", "1경기 2D 변환 실패"]
+    assert [n["title"] for n in h.notes] == ["하이라이트 1경기 완료 · 확인 필요 1건 (영상 1개 처리)"]
+    assert "https://youtu.be/1경기" in h.notes[0]["message"]
+    assert "※ 1경기: 2D 변환 실패 — pip 실패" in h.notes[0]["message"]
     assert h.files("done") == ["two_d.mp4"]
 
 
@@ -310,6 +328,108 @@ def test_max_segments_keeps_strongest(tmp_path, monkeypatch):
     h.add("g.mp4", 1500, start_min=0)
     h.run()
     assert h.built[0]["n"] == 1 and h.published[0]["approved"] == [0]   # delta_db 12 쪽
+
+
+# ─── 알림은 올린 영상을 다 처리한 뒤 한 통만 ────────────────────────────────
+def test_trickling_uploads_give_one_notification_at_the_end(h):
+    """영상이 띄엄띄엄 올라와도(처리 중에, 인박스가 빈 뒤에) 한 실행·한 알림으로 끝난다."""
+    start = h.clock.now()
+    h.add("g1.mp4", 1500, start_min=0)
+    h.clock.after(10, lambda: h.add("g2.mp4", 1500, start_min=60, arrived=h.clock.now()))
+    h.clock.after(10 + 3 + 15, lambda: h.add("g3.mp4", 1500, start_min=120, arrived=h.clock.now()))
+    h.run()
+
+    assert [p["label"] for p in h.published] == ["1경기", "2경기", "3경기"]
+    assert len(h.notes) == 1
+    note = h.notes[0]
+    assert note["title"] == "하이라이트 3경기 완료 (영상 3개 처리)"
+    assert all(f"https://youtu.be/{n}경기" in note["message"] for n in (1, 2, 3))
+    assert h.files("done") == ["g1.mp4", "g2.mp4", "g3.mp4"] and h.files("inbox") == []
+    # 마지막 경기를 끝낸 뒤 LINGER만큼 더 기다렸다가 알린다
+    assert h.clock.now() - start >= timedelta(minutes=10 + 3 + 15) + timedelta(seconds=ir.LINGER_SEC)
+
+
+def test_linger_waits_after_the_last_game_before_notifying(h):
+    start = h.clock.now()
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.clock.now() - start >= timedelta(seconds=ir.LINGER_SEC)
+    assert len(h.notes) == 1
+
+
+def test_upload_after_the_linger_window_is_a_separate_run(h):
+    h.add("g1.mp4", 1500, start_min=0)
+    h.run()
+    h.add("g2.mp4", 1500, start_min=60, arrived=h.clock.now() - timedelta(minutes=5))
+    h.run()
+    assert [n["title"] for n in h.notes] == ["하이라이트 1경기 완료 (영상 1개 처리)",
+                                             "하이라이트 1경기 완료 (영상 1개 처리)"]
+    assert "https://youtu.be/1경기" in h.notes[1]["message"]    # 둘째 알림에도 그날 글 전체
+    assert "https://youtu.be/2경기" in h.notes[1]["message"]
+
+
+def test_zero_linger_ends_right_after_the_last_game(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, linger_sec=0)
+    start = h.clock.now()
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.clock.now() == start and len(h.notes) == 1
+
+
+def test_empty_inbox_ends_immediately_without_notification(h):
+    start = h.clock.now()
+    summary = h.run()
+    assert h.notes == [] and h.clock.now() == start and summary["games"] == []
+
+
+def test_report_survives_unreadable_day_file(h):
+    runner = ir.InboxRunner(h.store, h.notifier, h.settings, workdir=h.workdir,
+                            now=h.clock.now, sleep=h.clock.sleep, log=lambda m: None)
+
+    def drive_down(name):
+        raise RuntimeError("drive down")
+
+    h.store.read_json = drive_down
+    runner._record("game", date="2026-09-27", label="1경기", files=1,
+                   yt_url="https://youtu.be/x", warnings=[])
+    runner.flush_report()
+    assert h.notes[0]["title"] == "하이라이트 1경기 완료 (영상 1개 처리)"
+    assert "https://youtu.be/x" in h.notes[0]["message"]
+    runner.flush_report()                                     # 보낸 뒤에는 비어 있어 다시 보내지 않는다
+    assert len(h.notes) == 1
+
+
+def test_build_report_orders_band_post_before_notes():
+    days = {"2026-09-27": {"date": "2026-09-27", "games": [
+        {"label": "1경기", "yt_url": "https://youtu.be/a"}, {"label": "2경기", "yt_url": None}]}}
+    events = [
+        {"kind": "game", "date": "2026-09-27", "label": "1경기", "files": 2, "yt_url": "https://youtu.be/a",
+         "warnings": ["나뉜 파일 2개를 한 경기로 합쳤습니다."]},
+        {"kind": "none", "date": "2026-09-27", "label": "2경기", "files": 1, "warnings": [],
+         "cands": 3, "maybe": 1},
+        {"kind": "fail", "names": "x.mp4", "files": 1, "reason": "영상이 짧습니다"},
+    ]
+    title, message, tags = ir.build_report(events, days)
+    assert title == "하이라이트 1경기 완료 · 확인 필요 2건 (영상 4개 처리)"
+    assert tags == ["soccer", "warning"]
+    assert message.startswith("2026년 09월 27일 경기 하이라이트 영상입니다.")
+    assert message.index("https://youtu.be/a") < message.index("※ 1경기: 나뉜 파일")
+    assert "※ 2경기: 하이라이트 없음" in message and "※ 처리 실패 — x.mp4" in message
+
+
+def test_main_reports_finished_games_before_the_fatal_error(tmp_path, monkeypatch):
+    sent = []
+    _, _, path = _kaggle_env(tmp_path, monkeypatch, sent)
+
+    def die_after_one_game(self):
+        self._record("game", date="2026-09-27", label="1경기", files=1,
+                     yt_url="https://youtu.be/a", warnings=[])
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(ir.InboxRunner, "run", die_after_one_game)
+    with pytest.raises(RuntimeError, match="disk full"):
+        ir.main(["--secrets", str(path), "--workdir", str(tmp_path)])
+    assert sent == ["하이라이트 1경기 완료 (영상 1개 처리)", "HLEditor 처리기 오류"]
 
 
 # ─── 순수 도우미 ─────────────────────────────────────────────────────────────
@@ -379,14 +499,19 @@ def test_load_secrets_and_find_recursively(tmp_path):
 def test_settings_from_secrets_and_cli_overrides():
     secrets = {"DEFAULT_TITLE": "우리 팀", "YOUTUBE_PRIVACY": "unlisted", "WAIT_NEXT_PART_MIN": "30",
                "SETTLE_SEC": "60", "RETENTION_DAYS": "3", "SENSITIVITY": "strict", "QUALITY": "bogus",
-               "GEMINI_API_KEY": "k"}
+               "LINGER_MIN": "5", "GEMINI_API_KEY": "k"}
     s = ir.settings_from(secrets, ir.parse_args([]))
     assert (s.default_title, s.youtube_privacy, s.retention_days) == ("우리 팀", "unlisted", 3)
-    assert (s.wait_next_part_sec, s.settle_sec) == (1800, 60)
+    assert (s.wait_next_part_sec, s.settle_sec, s.linger_sec) == (1800, 60, 300)
     assert (s.sensitivity, s.quality) == ("strict", "balanced")   # 모르는 값은 기본값으로
     s = ir.settings_from(secrets, ir.parse_args(["--settle-sec", "0", "--wait-part-min", "0",
-                                                  "--min-game-sec", "60", "--once", "--no-vision"]))
+                                                  "--min-game-sec", "60", "--once", "--no-vision",
+                                                  "--linger-min", "2"]))
     assert (s.settle_sec, s.wait_next_part_sec, s.min_game_sec, s.once, s.no_vision) == (0, 0, 60, True, True)
+    assert s.linger_sec == 120
+    assert ir.settings_from({}, ir.parse_args([])).linger_sec == ir.LINGER_SEC          # 기본 20분
+    assert ir.settings_from({}, ir.parse_args(["--local-inbox", "x"])).linger_sec == 0  # PC 시험은 안 기다림
+    assert ir.settings_from({}, ir.parse_args(["--local-inbox", "x", "--linger-min", "1"])).linger_sec == 60
 
 
 def test_mask_never_reveals_secret():

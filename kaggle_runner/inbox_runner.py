@@ -5,7 +5,9 @@ HLEditor 인박스 러너 — 폰에서 Drive에 올린 경기 영상을 Kaggle�
 흐름 (MOBILE_PLAN.md 3-2):
   01_inbox의 영상을 가져와(claim) 경기 단위로 묶고(30분 분할 파트 병합)
   → 오디오 후보 → [팬 분석 ∥ Gemini 판별] → 채택 → 빌드(워터마크) → YouTube 업로드
-  → ntfy 알림(그날 BAND 글 전체, 탭하면 복사) → 원본은 03_done.
+  → 원본은 03_done. 알림은 경기마다 보내지 않고 모아 둔다.
+  인박스가 빈 뒤에도 LINGER 동안 새 업로드를 더 기다렸다가, 끝나면 ntfy 알림 한 통
+  (그날 BAND 글 전체 + 확인할 일, 탭하면 복사)을 보낸다.
   2D 요청(01_inbox_2d)은 GPU 실행에서만 처리하고 결과는 Drive 05_output에 올린다.
 
 실행:
@@ -59,6 +61,7 @@ RUNTIME_PACKAGES = ["google-genai>=2.6,<3", "google-api-python-client>=2.100", "
 CLAIMS_FILE = "claims.json"
 MAX_ATTEMPTS = 3                  # 처리 도중 커널이 죽어 되돌려진 횟수가 이만큼이면 실패로 보낸다
 POLL_SEC = 30                     # 다음 파트·새 업로드를 기다릴 때 확인 간격
+LINGER_SEC = 20 * 60              # 인박스가 빈 뒤에도 새 업로드가 더 올지 기다리는 시간(알림은 그 뒤 한 번)
 MAX_RUN_SEC = 10 * 3600           # Kaggle 세션 한도(12시간) 전에 안전하게 멈춘다
 CLAIM_KEEP_DAYS = 60              # 끝난 claims 기록을 이만큼 지나면 정리
 QUALITY_MIN_HEIGHT = 1000         # 이보다 낮으면 폰 업로드 중 압축된 것으로 본다(F4)
@@ -102,6 +105,7 @@ class Settings:
     retention_days: int = 7
     wait_next_part_sec: float = grouping.WAIT_NEXT_PART_SEC
     settle_sec: float = grouping.SETTLE_SEC
+    linger_sec: float = LINGER_SEC
     min_game_sec: float = 300.0
     dry_run: bool = False
     no_vision: bool = False
@@ -146,6 +150,7 @@ def settings_from(secrets: dict, args) -> Settings:
         retention_days=num("RETENTION_DAYS", 7, int),
         wait_next_part_sec=num("WAIT_NEXT_PART_MIN", grouping.WAIT_NEXT_PART_SEC / 60) * 60,
         settle_sec=num("SETTLE_SEC", grouping.SETTLE_SEC),
+        linger_sec=num("LINGER_MIN", LINGER_SEC / 60) * 60,
         min_game_sec=num("MIN_GAME_SEC", 300.0),
         dry_run=args.dry_run,
         no_vision=args.no_vision,
@@ -156,6 +161,10 @@ def settings_from(secrets: dict, args) -> Settings:
         s.settle_sec = args.settle_sec
     if args.wait_part_min is not None:
         s.wait_next_part_sec = args.wait_part_min * 60
+    if args.linger_min is not None:
+        s.linger_sec = args.linger_min * 60
+    elif args.local_inbox:
+        s.linger_sec = 0          # PC 시험에서는 빈 뒤 20분을 기다리지 않는다
     if args.min_game_sec is not None:
         s.min_game_sec = args.min_game_sec
     if s.sensitivity not in sh.SENSITIVITY_PRESETS:
@@ -243,6 +252,50 @@ def next_label(day: dict) -> str:
 def band_text(day: dict) -> str:
     links = [(g["label"], g["yt_url"]) for g in day.get("games", []) if g.get("yt_url")]
     return band_poster.format_post_content(links, match_date=day["date"])
+
+
+# 한 번의 실행 결과를 알림 한 통으로 모으는 이벤트 종류(build_report가 읽는다)
+GAME_KINDS = ("game", "none", "yt_fail")        # 경기 하나를 처리한 결과
+PROBLEM_KINDS = ("none", "yt_fail", "fail", "2d_fail")
+
+
+def build_report(events: list[dict], days: dict[str, dict]) -> tuple[str, str, list[str]]:
+    """실행 결과 이벤트 → (제목, 본문, 태그). 본문 앞은 그날 BAND 글 전체(탭하면 복사), 뒤의 ※ 줄은 확인할 일."""
+    published = sum(1 for e in events if e["kind"] == "game")
+    videos = sum(e.get("files", 0) for e in events if e["kind"] in GAME_KINDS + ("fail",))
+    problems = sum(1 for e in events if e["kind"] in PROBLEM_KINDS)
+
+    dates = list(dict.fromkeys(e["date"] for e in events if e["kind"] in GAME_KINDS))
+    posts = [band_text(days[d]) for d in dates
+             if d in days and any(g.get("yt_url") for g in days[d].get("games", []))]
+
+    notes: list[str] = []
+    for e in events:
+        kind, label = e["kind"], e.get("label", "")
+        notes += [f"※ {label}: {w}" for w in e.get("warnings", [])]
+        if kind == "none":
+            notes.append(f"※ {label}: 하이라이트 없음 — 채택된 장면이 없어 YouTube에 올리지 않았습니다 "
+                         f"(후보 {e['cands']}개, 확인필요 {e['maybe']}개). 원본은 HLEditor/03_done에 있습니다.")
+        elif kind == "yt_fail":
+            help_text = f"\n{AUTH_HELP}" if "인증" in (e["error"] or "") else ""
+            notes.append(f"※ {label}: YouTube 업로드 실패 — {e['error']}\n"
+                         f"하이라이트는 Drive HLEditor/05_output에 올려 두었습니다: {e['link']}{help_text}")
+        elif kind == "fail":
+            notes.append(f"※ 처리 실패 — {e['names']}: {e['reason']}\n"
+                         "원본은 HLEditor/04_failed에 있습니다. 01_inbox로 옮기면 다시 처리합니다.")
+        elif kind == "2d_ok":
+            notes.append(f"※ {label}: 2D 영상을 Drive HLEditor/05_output에 올렸습니다: {e['link']}")
+        elif kind == "2d_fail":
+            notes.append(f"※ {label}: 2D 변환 실패 — {e['error']} (하이라이트는 정상 처리됨)")
+
+    message = "\n\n".join(posts)
+    if notes:
+        message += ("\n\n" if message else "") + "\n".join(notes)
+
+    head = f"하이라이트 {published}경기 완료" if published else "올라간 하이라이트 없음"
+    title = head + (f" · 확인 필요 {problems}건" if problems else "") + f" (영상 {videos}개 처리)"
+    tags = (["soccer"] if published else []) + (["warning"] if problems else [])
+    return title, message, tags
 
 
 # ─── 런타임 준비 (Kaggle) ────────────────────────────────────────────────────
@@ -350,6 +403,8 @@ class InboxRunner:
         self.log = log
         self.claims: dict = store.read_json(CLAIMS_FILE) or {}
         self.local: dict[str, LocalPart] = {}
+        self.report: list[dict] = []                    # 아직 알리지 않은 결과 — flush_report가 한 통으로 보낸다
+        self.last_activity: datetime | None = None      # 마지막으로 영상을 받거나 경기를 끝낸 시각
         self.summary: dict = {"started_at": iso(now()), "gpu": gpu,
                               "games": [], "failed": [], "released": []}
 
@@ -377,13 +432,61 @@ class InboxRunner:
             if ready:
                 continue          # 처리하는 동안 새 영상이 왔을 수 있으니 바로 다시 확인한다
             if not waiting and not claimed:
-                break             # 인박스가 비었고 기다리는 경기도 없다
+                if not self._lingering(deadline):
+                    break         # 인박스가 비었고 기다리는 경기도 없다
+                self.sleep(POLL_SEC)
+                continue
             if self.s.once or self.now() >= deadline:
                 self.release_waiting()
                 break
             self.sleep(POLL_SEC)
+        self.flush_report()
         self.summary["finished_at"] = iso(self.now())
         return self.summary
+
+    def _lingering(self, deadline: datetime) -> bool:
+        """처리를 마친 뒤에도 새 업로드가 더 올지 잠깐 기다릴지.
+
+        영상을 여러 개 올리면 도착 간격이 길어 인박스가 중간에 비기도 한다. 바로 끝내면
+        남은 영상이 새 실행·새 알림이 되므로, 마지막 활동 후 linger_sec 동안 더 기다린다.
+        """
+        if self.last_activity is None or self.s.once or self.s.linger_sec <= 0:
+            return False
+        now = self.now()
+        return now < deadline and (now - self.last_activity).total_seconds() < self.s.linger_sec
+
+    def _touch(self) -> None:
+        self.last_activity = self.now()
+
+    # 알림 ------------------------------------------------------------------
+    def _record(self, kind: str, **fields) -> None:
+        self.report.append({"kind": kind, **fields})
+
+    def _day_for(self, date: str, events: list[dict]) -> dict | None:
+        """그날 게시 목록. 저장소를 못 읽으면(인증 만료 등) 이번 실행의 결과만으로 만든다."""
+        try:
+            day = self.store.read_json(day_file(date))
+        except Exception as e:
+            self.log(f"날짜 기록({date})을 읽지 못해 이번 실행 결과만 알립니다: {e!r}")
+            day = None
+        if day:
+            return day
+        games = [{"label": e["label"], "yt_url": e.get("yt_url")}
+                 for e in events if e["kind"] in GAME_KINDS and e["date"] == date]
+        return {"date": date, "games": games} if games else None
+
+    def flush_report(self) -> None:
+        """모아 둔 결과를 알림 한 통으로 보낸다 — 올린 영상을 다 처리한 뒤 한 번만."""
+        events, self.report = self.report, []
+        if not events:
+            return
+        days = {}
+        for date in dict.fromkeys(e["date"] for e in events if e["kind"] in GAME_KINDS):
+            day = self._day_for(date, events)
+            if day:
+                days[date] = day
+        title, message, tags = build_report(events, days)
+        self.notify.send(title, message, tags=tags)
 
     def recover_processing(self) -> None:
         """지난 실행이 죽고 02_processing에 남긴 파일을 원래 폴더로 되돌린다."""
@@ -424,6 +527,7 @@ class InboxRunner:
                     continue
                 self._set_claim(rf, source=key, attempts=attempts, status="processing")
                 claimed.append(rf.id)
+                self._touch()
                 if attempts > MAX_ATTEMPTS:
                     self._fail([rf], f"{MAX_ATTEMPTS}번 처리하다 중간에 멈춰서 더 이상 "
                                      "자동으로 처리하지 않습니다. Kaggle 로그를 확인해 주세요.")
@@ -468,6 +572,7 @@ class InboxRunner:
             shutil.rmtree(game_dir, ignore_errors=True)
             for p in parts:
                 self._drop_local(p)
+            self._touch()
 
     def _process_game(self, group: grouping.Group, parts: list[LocalPart], game_dir: Path) -> None:
         match_date = kst_date(group.start_utc or group.files[0].arrived_utc)
@@ -510,13 +615,11 @@ class InboxRunner:
                   "start_kst": group.start_utc.astimezone(KST).isoformat(timespec="minutes")
                   if group.start_utc else None,
                   "processed_at": iso(self.now())}
+        game = {"date": match_date, "label": label, "files": len(parts), "warnings": warnings}
         if not selected:
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
-            self.notify.send(f"{label}: 하이라이트 없음",
-                             f"채택된 장면이 없어 YouTube에 올리지 않았습니다 "
-                             f"(후보 {len(cands)}개, 확인필요 {len(maybe)}개). "
-                             "원본은 HLEditor/03_done에 있습니다.")
+            self._record("none", **game, cands=len(cands), maybe=len(maybe))
             self._done(parts)
             self.summary["games"].append({"label": label, "date": match_date, "yt_url": None})
             return
@@ -535,11 +638,7 @@ class InboxRunner:
             record["yt_url"] = yt_url
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
-            played = sum(1 for g in day["games"] if g.get("yt_url"))
-            message = band_text(day)
-            if warnings:
-                message += "\n\n" + "\n".join(f"※ {w}" for w in warnings)
-            self.notify.send(f"{label} 하이라이트 완료 (오늘 {played}개)", message, tags=["soccer"])
+            self._record("game", **game, yt_url=yt_url)
             if self.s.dry_run:   # 로컬 시험: 결과 영상을 05_output에 남겨 직접 확인할 수 있게
                 self.store.upload(out_mp4, "output", out_mp4.name)
         else:
@@ -547,11 +646,7 @@ class InboxRunner:
             record["backup_link"] = link
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
-            help_text = f"\n{AUTH_HELP}" if "인증" in (yt_error or "") else ""
-            self.notify.send(f"{label} YouTube 업로드 실패",
-                             f"하이라이트는 만들었지만 YouTube에 올리지 못했습니다: {yt_error}\n"
-                             f"영상은 Drive HLEditor/05_output에 올려 두었습니다.{help_text}",
-                             tags=["warning"], click=link)
+            self._record("yt_fail", **game, error=yt_error, link=link)
         self._done(parts)
         self.summary["games"].append({"label": label, "date": match_date, "yt_url": yt_url,
                                       "error": yt_error})
@@ -613,14 +708,12 @@ class InboxRunner:
             final = game_dir / f"highlight_2d_{match_date}_{label}.mp4"
             rm.composite_pip(hl_out, radar, final, sh.run)
             link = self.store.upload(final, "output", final.name)
-            self.notify.send(f"{label} 2D 변환 완료", "2D 버드뷰를 얹은 하이라이트를 Drive "
-                             "HLEditor/05_output에 올렸습니다.", tags=["soccer"], click=link)
+            self._record("2d_ok", label=label, link=link)
         except Exception as e:
             if is_auth_error(e):
                 raise
             self.log(f"[{label}] 2D 변환 실패: {e!r}")
-            self.notify.send(f"{label} 2D 변환 실패", f"하이라이트는 정상 처리됐고 2D 변환만 "
-                             f"실패했습니다: {str(e)[:200]}", tags=["warning"])
+            self._record("2d_fail", label=label, error=str(e)[:200])
 
     # 상태 전이 --------------------------------------------------------------
     def _done(self, parts: list[LocalPart]) -> None:
@@ -634,9 +727,7 @@ class InboxRunner:
             self._set_claim(rf, status="failed", reason=reason[:300])
         names = ", ".join(rf.name for rf in files)
         self.summary["failed"].append({"files": names, "reason": reason})
-        self.notify.send(f"처리 실패: {names}",
-                         f"{reason}\n원본은 HLEditor/04_failed에 있습니다. "
-                         "01_inbox로 옮기면 다시 처리합니다.", tags=["warning"])
+        self._record("fail", names=names, files=len(files), reason=reason)
 
     def _drop_local(self, part: LocalPart) -> None:
         self.local.pop(part.remote.id, None)
@@ -673,6 +764,8 @@ def parse_args(argv=None):
     ap.add_argument("--max-segments", type=int, help="신호가 센 순으로 N개 구간만 빌드(시험용)")
     ap.add_argument("--settle-sec", type=float, help="도착 후 대기 시간(초) 재정의")
     ap.add_argument("--wait-part-min", type=float, help="다음 파트 대기 시간(분) 재정의")
+    ap.add_argument("--linger-min", type=float,
+                    help="인박스가 빈 뒤 새 업로드를 더 기다리는 시간(분) 재정의(--local-inbox 기본 0)")
     ap.add_argument("--min-game-sec", type=float, help="처리할 최소 경기 길이(초) 재정의")
     ap.add_argument("--once", action="store_true", help="기다리지 않고 한 번만 확인하고 끝낸다")
     ap.add_argument("--workdir", help="임시 작업 폴더(기본: 시스템 임시 폴더/hl_inbox)")
@@ -720,6 +813,7 @@ def main(argv=None) -> int:
     try:
         summary = runner.run()
     except Exception as e:
+        runner.flush_report()     # 이미 끝낸 경기의 결과는 오류 알림보다 먼저 전한다
         _notify_fatal(notifier, e)
         raise
     summary["notifications"] = len(notifier.sent)

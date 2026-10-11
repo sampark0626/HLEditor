@@ -8,6 +8,32 @@
 
 ## 실행 로그
 
+### 2026-10-11 — 알림을 "다 처리한 뒤 한 통"으로 (사용자 요청)
+
+**문제:** 영상을 여러 개 올릴 때 업로드가 오래 걸려, 마지막 영상이 올라오기 전에 알림이 먼저 왔다.
+알림이 두 군데서 일찍 나갔다. ① Apps Script가 첫 영상이 도착하자마자 "영상 1개 확인 — 처리 시작"을 보냈고
+(그 알림만 보면 영상이 1개만 올라간 것처럼 읽힌다), ② 러너가 경기마다 완료 알림을 따로 보냈다.
+그 결과 사용자가 영상을 다시 올려 작업이 중복됐다.
+
+**결정:** 처리는 지금처럼 첫 영상이 오면 바로 시작해 업로드와 나란히 진행한다(총 소요 시간이 짧다).
+대신 **알림만 미룬다.** 업로드가 끝났는지 서버가 직접 알 방법은 없으므로(Drive는 올리는 중인 파일을 보여 주지 않고,
+F15 때문에 푸시도 못 쓴다) "조용해질 때까지 기다린다"로 판단한다.
+- 러너: 경기별 알림 대신 결과를 모아 두었다가(`InboxRunner.report`) 실행이 끝날 때 `flush_report()`가 **한 통**으로 보낸다.
+- 러너: 인박스가 비어도 마지막 활동(영상 받음·경기 끝) 후 `LINGER_MIN`(기본 20분) 동안 더 기다린다. 그 사이 새 영상이 오면
+  같은 실행이 이어서 처리한다. `--once`·`--local-inbox`(PC 시험)는 기다리지 않는다.
+- Apps Script: "처리 시작" 알림은 기본 꺼짐. 스크립트 속성 `NOTIFY_START=1`이면 보낸다.
+- 알림 형식: 제목 `하이라이트 {n}경기 완료 · 확인 필요 {k}건 (영상 {m}개 처리)`. 본문은 그날 BAND 글 전체(탭하면 복사) 뒤에
+  `※` 줄(합친 파일·압축 경고·하이라이트 없음·YouTube 실패·처리 실패·2D 결과)을 붙인다. `(영상 m개 처리)`로 올린 개수와 대조할 수 있다.
+- 예외: 인증 만료·처리기 오류처럼 실행 전체가 멈추는 알림은 즉시 보낸다. 이때 이미 끝낸 경기의 결과는 오류 알림보다 먼저 보낸다.
+
+**한계:** 20분보다 오래 업로드가 끊기면 알림이 둘로 나뉜다(둘째 알림에도 그날 글 전체가 들어 있다). 이때는 `LINGER_MIN`을 늘린다.
+Kaggle이 프로세스를 강제로 죽이는 드문 경우엔 그 실행의 결과 알림이 오지 않을 수 있다(이미 YouTube에 올라간 영상은 채널에서,
+기록은 `_state/day_*.json`에서 확인). 마지막 영상 뒤 대기 시간만큼 알림이 늦어진다.
+
+**테스트:** pytest 200개, Apps Script Node 테스트 23개 통과. 신규: 띄엄띄엄 올라오는 영상 3개 → 알림 1통, 대기 시간 준수,
+대기 뒤에 온 영상은 별도 실행, 저장소를 못 읽어도 알림 전달, 오류 직전 결과 전달, `NOTIFY_START`.
+**배포:** main에 push해야 Kaggle이 새 러너를 받고(`kernel_bootstrap.py`가 main을 clone), Apps Script는 `Code.gs`를 편집기에 다시 붙여넣어야 한다.
+
 ### 2026-09-26 — Opus 5.5가 코드 전체 구현 (사용자 계정 단계만 남음)
 
 사용자가 "계획에 맞춰 끝까지 구현"을 요청해 Sonnet 대신 이 세션에서 바로 구현했다.
@@ -69,10 +95,10 @@
 1. 경기가 끝나면 **Drive 앱 → `HLEditor/01_inbox` → + → 업로드 → 사진 및 동영상**에서 영상을 고른다.
    XbotGo 앱의 영상은 먼저 사진 앱에 저장해 둔다. 30분 단위로 나뉜 파일은 한 번에 같이 고른다.
    업로드가 끝날 때까지 Drive 앱을 켜 둔다(5G로 4~10분).
-2. (자동) Apps Script가 **일·월요일엔 5분마다**, 그 외 요일엔 1시간마다 인박스를 확인한다. 영상이 있으면 Kaggle을 시작하고 "처리 시작" 알림을 보낸다.
+2. (자동) Apps Script가 **일·월요일엔 5분마다**, 그 외 요일엔 1시간마다 인박스를 확인한다. 영상이 있으면 Kaggle을 시작한다(시작 알림은 기본 꺼짐, `NOTIFY_START=1`로 켬).
    (선택) 아이폰 단축어 자동화를 켜 두면 Drive 앱에서 나오는 순간 바로 시작한다(3-3).
    처리는 병합 → 오디오 후보 → [팬 분석 ∥ Gemini 판별] → 채택 → 빌드 → YouTube 업로드(제목·챕터·썸네일) 순서로 진행한다.
-3. ntfy 알림이 오면 알림을 탭하고, ntfy 앱에서 메시지를 탭해 **BAND 글 전체를 복사**한 뒤 BAND에 붙여넣는다.
+3. 올린 영상을 모두 처리하면 **ntfy 알림이 한 통** 온다(마지막 영상 뒤 `LINGER_MIN` 대기 포함). 알림을 탭하고, ntfy 앱에서 메시지를 탭해 **BAND 글 전체를 복사**한 뒤 BAND에 붙여넣는다.
 
 2D(Dot Play)가 필요한 경기만 `01_inbox_2d`에 올린다. 그러면 하이라이트 알림이 먼저 오고, 2D 결과는 별도 알림으로 온다.
 2D 완성도가 아직 낮아서 **기본은 끔**이다.
@@ -127,16 +153,17 @@
 [Google Apps Script tick()] ◀── 타이머 (일·월 5분 / 그 외 1시간)
                             ◀── (선택) 단축어 자동화: Drive 앱을 나올 때 실행 링크 doGet?key=… 호출
   inbox에 영상 있음 + 커널이 실행 중 아님
-  → ntfy "처리 시작" + Kaggle SaveKernel(push=실행)
+  → Kaggle SaveKernel(push=실행)  (+ 선택: NOTIFY_START=1이면 ntfy "처리 시작")
                                    │
 [Kaggle 비공개 커널 hleditor-inbox]  (평소 CPU / 01_inbox_2d에 파일 있으면 GPU T4)
   kernel_bootstrap: git clone → kaggle_runner.inbox_runner.main()
   루프:
     claim(01_inbox → 02_processing) → 다운로드 → ffprobe → 경기 묶기(분할 파트 체인)
     → 병합 → 오디오 후보 → [팬 분석 ∥ Gemini 판별] → 팬 보정 → 채택 → 빌드(워터마크)
-    → YouTube 업로드 → _state 갱신 → ntfy 알림(BAND 글) → 원본 03_done
-    (실패: 원본 04_failed + 실패 알림)   (2D 요청: Dot Play → 05_output → 2D 알림)
-  inbox가 비고 기다리는 파트도 없으면 종료
+    → YouTube 업로드 → _state 갱신 → 결과를 모아 둠 → 원본 03_done
+    (실패: 원본 04_failed)   (2D 요청: Dot Play → 05_output)
+  inbox가 비고 기다리는 파트도 없으면 LINGER_MIN(20분) 더 기다린 뒤 종료
+  종료 직전 ntfy 알림 한 통(BAND 글 + ※ 확인할 일)
                                    │
 [ntfy.sh] ──푸시→ [iPhone ntfy 앱] → 탭해서 복사 → BAND에 붙여넣기
 ```
@@ -194,13 +221,17 @@
 - **상태와 알림 글:**
   - `_state/days/{date}.json`에 `{label, yt_url, start_kst, source_names}`를 추가한다.
   - `band_poster.format_post_content(그날 전체 목록, match_date)`로 **그날 전체 BAND 글**을 만든다.
-  - 완료 알림 제목은 `"{n}경기 하이라이트 완료 (오늘 {m}개)"`, 본문은 BAND 글 전체다. **click은 넣지 않는다**(탭하면 복사되게, F8). 경고가 있으면 본문 끝에 덧붙인다.
-  - 시작 알림은 커널이 아니라 **Apps Script가 push할 때** 보낸다(3-3). 업로드 직후 바로 "받았다"는 확인을 주기 위함이다.
+  - **알림은 경기마다 보내지 않고 실행당 한 통**이다(2026-10-11 변경, 실행 로그 참고). 경기·실패·2D 결과를 이벤트로 모아 두었다가
+    실행이 끝날 때 보낸다. 제목은 `"하이라이트 {n}경기 완료 · 확인 필요 {k}건 (영상 {m}개 처리)"`, 본문은 BAND 글 전체 뒤에 `※` 줄이다.
+    **click은 넣지 않는다**(탭하면 복사되게, F8). Drive 링크(YouTube 실패 백업, 2D 결과)도 click이 아니라 `※` 줄 본문에 넣는다.
+  - 시작 알림은 기본으로 보내지 않는다. 업로드가 진행 중일 때 오면 다 올라간 것으로 오해하기 때문이다. `NOTIFY_START=1`이면 Apps Script가 push할 때 보낸다(3-3).
   - `sh.save_results()` 형식의 판별 결과를 `_state/results/`에 올린다(v2의 "나중에 2D"와 PC 검토용).
 - **정리:** 성공한 원본은 `03_done`으로 옮긴다. 커널이 시작할 때 `03_done`에서 `RETENTION_DAYS`(기본 7일)가 지난 파일을
   **휴지통**(`trashed=true`)으로 보낸다. 영구 삭제는 하지 않는다(휴지통은 Drive가 30일 뒤에 비운다).
-- **종료:** `01_inbox`(GPU 실행이면 `01_inbox_2d`도)가 비어 있고 기다리는 그룹도 없으면
-  `/kaggle/working/run_summary.json`에 요약을 쓰고 종료한다. 실행이 10시간을 넘으면 안전하게 종료한다(세션 한도 대비).
+- **종료:** `01_inbox`(GPU 실행이면 `01_inbox_2d`도)가 비어 있고 기다리는 그룹도 없어도, 마지막 활동(영상 받음·경기 끝) 후
+  `LINGER_MIN`(기본 20분)이 지날 때까지 30초마다 새 영상을 확인한다. 그 뒤 알림 한 통을 보내고
+  `/kaggle/working/run_summary.json`에 요약을 쓰고 종료한다. 이번 실행에서 아무것도 받지 않았으면 기다리지 않고 알림도 없다.
+  실행이 10시간을 넘으면 안전하게 종료한다(세션 한도 대비).
 - **2D:** GPU 실행일 때만 `01_inbox_2d`를 가져간다(CPU 실행은 건드리지 않음).
   하이라이트 알림까지 끝낸 뒤, `run_match.py`의 2D 코드(`resolve_models`, `run_radar_segments`, `composite_pip`)를
   **복제하지 말고 import해서 재사용**한다. 결과는 `05_output`에 올리고 `"2D 완료"` 알림을 보낸다(이 알림은 click에 Drive 링크).
@@ -233,10 +264,10 @@
    - `isPrivate=true`, `enableInternet=true`, `datasetDataSources=[<user>/<SECRETS_DATASET>]`
    - `01_inbox_2d`에 파일이 있으면 `machineShape="NvidiaTeslaT4"`, 없으면 이 필드를 생략한다(CPU).
    - 응답의 `error`와 `invalid*` 필드도 확인한다(HTTP 200이어도 거절일 수 있음).
-   - push에 성공하면 ntfy로 `"영상 {k}개 확인 — 처리 시작 (경기당 약 25분)"`을 보낸다.
+   - push에 성공해도 기본으로는 알림을 보내지 않는다. `NOTIFY_START=1`이면 ntfy로 `"영상 {k}개 확인 — 처리 시작"`을 보낸다.
 - `text`는 raw GitHub의 `kaggle_runner/kernel_bootstrap.py`를 받아서 넣는다. 받기에 실패하면 코드에 내장한 사본을 쓴다.
 - Script Properties:
-  - 설정값: `KAGGLE_USERNAME`, `KAGGLE_API_TOKEN`, `KERNEL_SLUG`(hleditor-inbox), `SECRETS_DATASET`(hl-secrets), `ROOT_FOLDER_ID`, `NTFY_TOPIC`, `FAST_DAYS`(기본 `7,1`), `KICK_KEY`(무작위 32자)
+  - 설정값: `KAGGLE_USERNAME`, `KAGGLE_API_TOKEN`, `KERNEL_SLUG`(hleditor-inbox), `SECRETS_DATASET`(hl-secrets), `ROOT_FOLDER_ID`, `NTFY_TOPIC`, `FAST_DAYS`(기본 `7,1`), `NOTIFY_START`(기본 꺼짐), `KICK_KEY`(무작위 32자)
   - 상태값: `LAST_PUSH_AT`, `ERROR_STREAK`, `LAST_SLOW_CHECK_AT`
 - 함수: `tick()`, `doGet()`, `installTrigger()`, `resetBreaker()`, `testPush()`(수동 테스트용).
 - **실행 링크(`doGet`):** 코드는 항상 넣는다. 웹 앱 배포는 사용자가 원할 때만 한다(단축어 자동화나 수동 '지금 확인' 버튼용).
@@ -265,7 +296,7 @@
 
 - refresh token의 권한 범위는 `drive`, `youtube.upload`, `youtube`다. Drive 앱이 올린 파일을 읽어야 해서 `drive.file`로는 부족하다.
 - 선택 키(없으면 기본값): `SENSITIVITY=normal`, `QUALITY=balanced`, `RETENTION_DAYS=7`,
-  `WAIT_NEXT_PART_MIN=40`, `SETTLE_SEC=180`, `MIN_GAME_SEC=300`.
+  `WAIT_NEXT_PART_MIN=40`, `SETTLE_SEC=180`, `LINGER_MIN=20`, `MIN_GAME_SEC=300`.
 - 커널은 `/kaggle/input` 아래를 **재귀 탐색**해 `hl_secrets.json`을 찾는다. 마운트 깊이가 일정하지 않기 때문이다(`run_match.discover_match_videos` 주석 참고).
 - 값은 로그나 오류 메시지에 절대 출력하지 않는다(마스킹).
 - YouTube 모듈에는 이 값으로 `youtube_uploader._save_token`과 같은 형식의 토큰 파일을 임시 경로에 만들어 넘긴다(1-4).
@@ -388,7 +419,7 @@
   - (선택) 아이폰 단축어 앱 → 자동화 → 새 자동화 → **앱** → Google Drive, **'닫힘'** 선택 → **즉시 실행** → 동작 'URL 콘텐츠 가져오기'에 실행 링크를 넣는다.
     '실행 시 알림'은 끈다.
 - **4-3** 아이폰으로 E2E를 확인한다.
-  - (a) 일·월요일에 업로드만 하면 5분 안에 "처리 시작" 알림이 오는지, 이후 완료 알림까지 아무것도 누르지 않아도 되는지 확인한다.
+  - (a) 일·월요일에 업로드만 하면 5분 안에 Kaggle이 시작되는지(`NOTIFY_START=1`이면 "처리 시작" 알림도), 이후 완료 알림 한 통까지 아무것도 누르지 않아도 되는지 확인한다.
   - (b) 처리 도중 다른 경기를 올리면 같은 실행이 이어서 처리하는지 확인한다.
   - (c) 일부러 실패를 만든다(짧은 영상 또는 깨진 파일) → `04_failed`로 가고 실패 알림이 오는지 확인한다.
   - (d) 서킷브레이커가 동작하는지 확인한다(`KERNEL_SLUG`를 일부러 틀리게 해서 연속 ERROR를 만든다).
