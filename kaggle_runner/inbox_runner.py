@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -66,6 +67,10 @@ MAX_RUN_SEC = 10 * 3600           # Kaggle 세션 한도(12시간) 전에 안전
 CLAIM_KEEP_DAYS = 60              # 끝난 claims 기록을 이만큼 지나면 정리
 QUALITY_MIN_HEIGHT = 1000         # 이보다 낮으면 폰 업로드 중 압축된 것으로 본다(F4)
 QUALITY_MIN_VIDEO_BPS = 4_000_000
+# classify_all_parallel은 후보 하나의 오류를 highlight=False로 삼켜 배치를 살린다. 그래서 전부 실패해도
+# "하이라이트 없음"으로 보인다 — 오류로 끝난 후보의 사유가 이 접두어로 시작한다.
+JUDGE_ERROR_PREFIXES = ("api_error:", "clip_error:", "parse_error:", "no_video_clip")
+JUDGE_FAIL_RATIO = 0.5            # 판별 오류가 후보의 이 비율 이상이면 "하이라이트 없음"이 아니라 처리 실패로 본다
 
 
 def log(msg: str) -> None:
@@ -228,6 +233,12 @@ def probe_media(path) -> MediaInfo:
     out = sh.run(["ffprobe", "-v", "error", "-print_format", "json",
                   "-show_format", "-show_streams", str(path)])
     return parse_probe(json.loads(out))
+
+
+def judge_errors(cands: list[dict]) -> list[str]:
+    """Gemini 판별이 오류로 끝난 후보들의 사유."""
+    reasons = (str(c.get("reason") or "") for c in cands)
+    return [r for r in reasons if r.startswith(JUDGE_ERROR_PREFIXES)]
 
 
 def quality_warning(info: MediaInfo) -> str | None:
@@ -610,6 +621,14 @@ class InboxRunner:
         self.log(f"[{label}] 후보 {len(cands)}개 → 채택 {len(selected)}개 (확인필요 {len(maybe)}개), "
                  f"팬 {info['pan']}, 비용 ${(info['usage'] or {}).get('cost_usd', 0)}")
         self._save_results(match_date, label, video, group, cands, info)
+
+        errors = judge_errors(cands) if info["vision_used"] else []
+        if errors:
+            sample = Counter(errors).most_common(1)[0][0]
+            self.log(f"[{label}] AI 판별 오류 {len(errors)}/{len(cands)}개 — 가장 많은 사유: {sample}")
+            if len(errors) >= len(cands) * JUDGE_FAIL_RATIO:
+                raise RuntimeError(f"AI 판별이 후보 {len(cands)}개 중 {len(errors)}개에서 실패했습니다 — {sample}")
+            warnings.append(f"AI 판별 오류 {len(errors)}개는 제외하고 처리했습니다 — {sample}")
 
         record = {"label": label, "yt_url": None, "sources": [p.remote.name for p in parts],
                   "start_kst": group.start_utc.astimezone(KST).isoformat(timespec="minutes")

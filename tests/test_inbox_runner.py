@@ -192,6 +192,47 @@ def test_no_highlights_still_takes_a_game_number(h):
     assert h.store.read_json("day_2026-09-27.json")["games"][0]["yt_url"] is None
 
 
+def test_all_judge_errors_fail_the_game_instead_of_saying_no_highlights(h):
+    err = "api_error: 404 NOT_FOUND. models/x is not found"
+    h.verdict = lambda c: {"highlight": False, "type": "other", "confidence": 0.0, "reason": err}
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.files("failed") == ["g.mp4"] and h.files("done") == []
+    msg = h.notes[0]["message"]
+    assert "처리 실패 — g.mp4" in msg and "AI 판별이 후보 2개 중 2개에서 실패" in msg and err in msg
+    assert "하이라이트 없음" not in msg
+    assert h.published == [] and h.store.read_json("day_2026-09-27.json") is None   # 경기 번호도 쓰지 않음
+    cands = h.store.read_json("results_2026-09-27_1경기.json")["candidates"]       # 사유는 결과 JSON에 남는다
+    assert {c["reason"] for c in cands} == {err}
+
+
+def test_partial_judge_errors_are_skipped_with_a_warning(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch)
+    monkeypatch.setattr(ir.sh, "detect_spikes", lambda video, wd, **k: [
+        {"peak": float(p), "delta_db": 10.0} for p in (100, 200, 300, 400)])
+    h.verdict = lambda c: (
+        {"highlight": False, "type": "other", "confidence": 0.0, "reason": "clip_error: boom"}
+        if c["peak"] == 100.0 else {"highlight": True, "confidence": 0.9, "type": "shot", "reason": "슛"})
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.published[0]["approved"] == [1, 2, 3]
+    assert "※ 1경기: AI 판별 오류 1개는 제외하고 처리했습니다 — clip_error: boom" in h.notes[0]["message"]
+
+
+def test_judge_errors_ignored_when_vision_was_not_used(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch)
+
+    def no_vision(video, workdir, cands, gemini_key=None, log=print):
+        for c in cands:
+            c["reason"] = "api_error: 이전 실행의 흔적"
+        return {"vision_used": False, "usage": None, "pan": None}
+
+    monkeypatch.setattr(ir, "analyze_candidates", no_vision)
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.files("failed") == [] and h.files("done") == ["g.mp4"]
+
+
 def test_youtube_failure_backs_up_to_drive_and_says_how_to_fix_auth(h):
     h.publish_error = "YouTube 인증이 만료되었거나 취소되었습니다. 다시 로그인해주세요."
     h.add("g.mp4", 1500, start_min=0)
