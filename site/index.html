@@ -5,237 +5,275 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>HLEditor — 경기 영상 자동 하이라이트</title>
 <meta name="description" content="동호회 축구 경기 영상을 폰으로 올리면 AI가 골 장면을 골라 YouTube에 올리고, BAND에 붙여넣을 글까지 알려 주는 자동화 파이프라인.">
-<meta name="theme-color" content="#f4f7f3" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0c130f" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#07090b">
 <meta property="og:type" content="website">
 <meta property="og:title" content="HLEditor — 올리면 하이라이트가 알림으로 옵니다">
 <meta property="og:description" content="폰으로 경기 영상만 올리면 AI가 골 장면을 골라 YouTube에 올리고 알림까지 보내 줘요. 서버 없이 Google Drive로 자동화했어요.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2315803d'/%3E%3Ctext x='16' y='22' font-family='Arial' font-weight='800' font-size='15' text-anchor='middle' fill='white'%3EHL%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c9f55a'/%3E%3Ctext x='16' y='21.5' font-family='Arial' font-weight='900' font-size='14' text-anchor='middle' fill='%230a0d06'%3EHL%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <style>
 :root{
-  color-scheme:light dark;
-  --bg:#f4f7f3; --surface:#fff; --surface-2:#eef3ee; --ink:#13201a; --muted:#51675b; --line:#dbe4dd;
-  --brand:#15803d; --brand-ink:#0f5a2b; --brand-soft:#dcf3e3; --on-brand:#fff;
-  --hl:#b45309; --hl-soft:#fdecc8; --hl-line:#f59e0b;
-  --sky-a:#cfe6ff; --sky-b:#eef7ff; --hill:#a9d3b4; --ground:#2d7d47; --grass-a:#3a9a57; --grass-b:#348e50; --chalk:rgba(255,255,255,.92);
-  --team-a:#e5484d; --team-b:#2f7fe0; --cam:#243b2f; --cam-2:#3d5a49; --tripod:#4b5d53; --tree:#2f8049; --tree-2:#3d9459; --bld:#cfdad2;
-  --radius:18px; --shadow:0 1px 2px rgba(19,32,26,.05),0 10px 30px rgba(19,32,26,.07);
-}
-@media (prefers-color-scheme:dark){
-  :root{
-    --bg:#0c130f; --surface:#131d17; --surface-2:#1a2620; --ink:#e9f1ec; --muted:#a4b8ac; --line:#25352c;
-    --brand:#4ade80; --brand-ink:#86efac; --brand-soft:#123221; --on-brand:#04210f;
-    --hl:#fbbf24; --hl-soft:#3a2c0a; --hl-line:#fbbf24;
-    --sky-a:#10243a; --sky-b:#1b3858; --hill:#17382a; --ground:#1c4d2c; --grass-a:#27703f; --grass-b:#226439; --chalk:rgba(255,255,255,.82);
-    --cam:#cdddd3; --cam-2:#8fa99b; --tripod:#8aa094; --tree:#1b4d2e; --tree-2:#235e38; --bld:#2a3a31;
-    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
-  }
+  color-scheme:dark;
+  --bg:#07090b; --bg-2:#0c1014; --surface:rgba(255,255,255,.035); --surface-2:rgba(255,255,255,.065);
+  --line:rgba(255,255,255,.085); --line-2:rgba(255,255,255,.16);
+  --ink:#f2f4f0; --muted:#a3aca7; --faint:#808a85;
+  --volt:#c9f55a; --volt-ink:#0a0d06; --volt-soft:rgba(201,245,90,.11);
+  --amber:#f6b45a; --amber-soft:rgba(246,180,90,.12);
+  --radius:22px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;word-break:keep-all;overflow-wrap:break-word;-webkit-font-smoothing:antialiased}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;background:var(--bg)}
+body{margin:0;color:var(--ink);background:radial-gradient(900px 560px at 50% -160px,rgba(201,245,90,.10),transparent 65%),var(--bg);font:16px/1.7 "Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;word-break:keep-all;overflow-wrap:break-word;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.045;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 img,svg,video{display:block;max-width:100%}
-a{color:var(--brand-ink)}
-:focus-visible{outline:3px solid var(--hl-line);outline-offset:3px;border-radius:6px}
-.wrap{width:100%;max-width:1040px;margin:0 auto;padding:0 max(16px,env(safe-area-inset-left)) 0 max(16px,env(safe-area-inset-right))}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+a{color:var(--volt)}
+code{font:600 .88em/1 var(--mono);color:var(--ink);background:var(--surface-2);padding:2px 6px;border-radius:6px}
+:focus-visible{outline:2px solid var(--volt);outline-offset:3px;border-radius:8px}
+.wrap{width:100%;max-width:1120px;margin:0 auto;padding:0 max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left))}
 
 /* 상단 바 */
-.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:saturate(1.4) blur(10px);-webkit-backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line);padding-top:env(safe-area-inset-top)}
-.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:56px;flex-wrap:wrap}
-.brand{display:inline-flex;align-items:center;gap:10px;min-height:44px;font-weight:800;font-size:1.05rem;color:var(--ink);text-decoration:none;letter-spacing:-.01em}
-.brand i{display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:var(--brand);color:var(--on-brand);font:800 .8rem/1 Arial,sans-serif;font-style:normal}
-.gh{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:999px;color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem;background:var(--surface)}
-.nav{display:flex;gap:6px;overflow-x:auto;width:100%;padding:0 0 10px;scrollbar-width:none;order:3}
-.nav::-webkit-scrollbar{display:none}
-.nav a{flex:none;display:inline-flex;align-items:center;min-height:42px;padding:0 14px;border-radius:999px;background:var(--surface-2);color:var(--ink);text-decoration:none;font-size:.9rem;font-weight:600}
-@media(min-width:760px){.nav{width:auto;order:0;padding:0;overflow:visible;margin-left:auto}.gh{order:1}.bar{flex-wrap:nowrap}}
+.top{position:sticky;top:0;z-index:30;background:rgba(7,9,11,.72);backdrop-filter:saturate(1.5) blur(14px);-webkit-backdrop-filter:saturate(1.5) blur(14px);border-bottom:1px solid var(--line);padding-top:env(safe-area-inset-top)}
+.bar{display:flex;align-items:center;gap:10px;height:58px}
+.brand{display:inline-flex;align-items:center;gap:10px;min-height:44px;color:var(--ink);text-decoration:none;font-weight:800;font-size:1.02rem;letter-spacing:-.02em}
+.brand i{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--volt);color:var(--volt-ink);font:900 .7rem/1 Arial,sans-serif;font-style:normal}
+.nav{display:none;margin-left:auto;gap:2px}
+.nav a{color:var(--muted);text-decoration:none;font-size:.88rem;font-weight:600;padding:8px 12px;border-radius:999px;transition:color .2s,background .2s}
+.nav a:hover{color:var(--ink);background:var(--surface-2)}
+.gh{margin-left:auto;display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:0 15px;border-radius:999px;border:1px solid var(--line-2);color:var(--ink);text-decoration:none;font-size:.86rem;font-weight:600}
+.gh span{color:var(--muted)}
+@media(min-width:880px){.nav{display:flex}.gh{margin-left:6px}}
 
 /* 공통 */
-.section{padding:52px 0}
-@media(min-width:760px){.section{padding:84px 0}}
-.eyebrow{margin:0 0 10px;color:var(--brand-ink);font-weight:800;font-size:.82rem;letter-spacing:.06em}
-h1,h2,h3{line-height:1.3;letter-spacing:-.02em;margin:0}
-h2{font-size:clamp(1.55rem,5.6vw,2.2rem);margin-bottom:14px}
-.lead{font-size:clamp(1rem,3.8vw,1.15rem);color:var(--muted);margin:0;max-width:44ch}
-.sec-head{margin-bottom:28px}
-.sec-head p{margin:0;color:var(--muted);max-width:56ch}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
-.btn{display:inline-flex;align-items:center;justify-content:center;min-height:50px;padding:0 20px;border-radius:999px;font-weight:700;text-decoration:none;font-size:1rem;border:1px solid transparent;white-space:nowrap}
-.btn.primary{background:var(--brand);color:var(--on-brand)}
-.btn.ghost{background:var(--surface);color:var(--ink);border-color:var(--line)}
+.section{padding:76px 0;scroll-margin-top:58px;border-top:1px solid var(--line)}
+@media(min-width:880px){.section{padding:120px 0}}
+.kicker{display:flex;align-items:center;gap:10px;margin:0 0 16px;font-size:.82rem;font-weight:700;letter-spacing:.08em;color:var(--muted)}
+.kicker b{font:600 .78rem/1 var(--mono);color:var(--volt);letter-spacing:.04em}
+.kicker::after{content:"";width:36px;height:1px;background:var(--line-2)}
+h1,h2,h3{margin:0;font-weight:800}
+h2{font-size:clamp(1.85rem,7.6vw,3rem);line-height:1.17;letter-spacing:-.04em;margin-bottom:16px}
+h3{letter-spacing:-.02em;line-height:1.35}
+.hl{background:linear-gradient(100deg,var(--volt) 20%,#efffc2);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sec-head{margin-bottom:34px}
+.sec-head p{margin:0;color:var(--muted);max-width:52ch;font-size:1.02rem}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+.btn{flex:1 1 auto;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:52px;padding:0 22px;border-radius:999px;font-weight:700;font-size:1rem;text-decoration:none;white-space:nowrap;border:1px solid transparent;transition:transform .2s,box-shadow .2s,background .2s}
+.btn.primary{background:var(--volt);color:var(--volt-ink);box-shadow:0 10px 34px -6px rgba(201,245,90,.35)}
+.btn.ghost{background:var(--surface);color:var(--ink);border-color:var(--line-2)}
+.btn:active{transform:scale(.98)}
 .cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px}
-.cta .btn{flex:1 1 auto}
-@media(min-width:560px){.cta .btn{flex:0 0 auto}}
-.js .reveal:not(.in){opacity:0;transform:translateY(14px)}
-.reveal{transition:opacity .6s ease,transform .6s ease}
+@media(min-width:560px){.btn{flex:0 0 auto}}
+.tag{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:.7rem;font-weight:800;background:var(--volt-soft);color:var(--volt);vertical-align:2px}
+.tag.h{background:var(--amber-soft);color:var(--amber)}
+.ic{flex:none;width:42px;height:42px;border-radius:13px;display:grid;place-items:center;border:1px solid var(--line-2);background:var(--surface);color:var(--volt)}
+.ic svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.js .reveal:not(.in){opacity:0;transform:translateY(18px)}
+.reveal{transition:opacity .8s cubic-bezier(.2,.7,.2,1),transform .8s cubic-bezier(.2,.7,.2,1)}
 
 /* 히어로 */
-.hero{padding:34px 0 8px;background:radial-gradient(1200px 420px at 80% -10%,var(--brand-soft),transparent 70%)}
-.hero h1{font-size:clamp(1.7rem,7.2vw,2.5rem);font-weight:800;margin-bottom:16px}
-.hero h1 em{font-style:normal;color:var(--brand);background:linear-gradient(transparent 62%,var(--hl-soft) 62%)}
-.hero-grid{display:grid;gap:28px;align-items:center}
-@media(min-width:900px){.hero{padding:64px 0 24px}.hero-grid{grid-template-columns:1.15fr 1fr;gap:44px}}
-.scene{margin:0;border-radius:22px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow);background:var(--surface)}
-.scene-box{position:relative;aspect-ratio:360/330;background:var(--ground)}
+.hero{padding:30px 0 0;position:relative}
+.hero-grid{display:grid;gap:26px}
+.badge{display:inline-flex;align-items:center;gap:8px;margin:0 0 18px;padding:6px 13px 6px 11px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface);font-size:.8rem;font-weight:600;color:var(--muted)}
+.badge i{width:7px;height:7px;border-radius:50%;background:var(--volt);box-shadow:0 0 10px var(--volt)}
+.hero h1{font-size:clamp(2.05rem,8.6vw,3.5rem);line-height:1.13;letter-spacing:-.045em}
+.lead{margin:0;color:var(--muted);font-size:clamp(1.02rem,4vw,1.15rem);line-height:1.75;max-width:40ch}
+.hero-stats{display:grid;grid-template-columns:repeat(3,1fr);margin:28px 0 0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.hero-stats li{padding:14px 0 2px}
+.hero-stats li+li{padding-left:16px;border-left:1px solid var(--line)}
+.hero-stats b{display:block;font-size:1.55rem;letter-spacing:-.03em;line-height:1.2}
+.hero-stats span{font-size:.8rem;color:var(--muted)}
+@media(min-width:960px){
+  .hero{padding:76px 0 40px}
+  .hero-grid{grid-template-columns:1.05fr 1fr;grid-template-areas:"copy scene" "sub scene";column-gap:60px;row-gap:30px;align-items:center}
+  .hero-copy{grid-area:copy;align-self:end}.scene{grid-area:scene}.hero-sub{grid-area:sub;align-self:start}
+}
+
+/* 촬영 장면 */
+.scene{margin:0 -16px;position:relative;background:#05080d;border-block:1px solid var(--line);overflow:hidden}
+@media(min-width:600px){.scene{margin:0;border:1px solid var(--line-2);border-radius:28px;box-shadow:0 50px 90px -40px rgba(0,0,0,.9),0 0 80px -20px rgba(201,245,90,.12)}}
+.scene-box{position:relative;aspect-ratio:360/330}
 .scene-box svg{width:100%;height:100%}
-.rec{position:absolute;left:12px;top:12px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:rgba(10,20,15,.72);color:#fff;font:700 .72rem/1.4 Arial,sans-serif;letter-spacing:.08em}
-.rec i{width:8px;height:8px;border-radius:50%;background:#ef4444;animation:blink 1.2s steps(2,start) infinite}
-.goal-tag{position:absolute;right:12px;top:12px;padding:5px 12px;border-radius:999px;background:var(--hl-line);color:#2a1a00;font-weight:800;font-size:.8rem;opacity:0;transform:translateY(-6px) scale(.96);transition:opacity .25s,transform .25s}
+.rec{position:absolute;left:14px;top:14px;display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;background:rgba(0,0,0,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.12);color:#fff;font:600 .7rem/1.3 var(--mono);letter-spacing:.06em}
+.rec i{width:7px;height:7px;border-radius:50%;background:#ff4d4d;box-shadow:0 0 8px #ff4d4d;animation:blink 1.2s steps(2,start) infinite}
+.goal-tag{position:absolute;right:14px;top:14px;padding:5px 12px;border-radius:999px;background:var(--volt);color:var(--volt-ink);font-weight:800;font-size:.75rem;opacity:0;transform:translateY(-6px);transition:opacity .25s,transform .25s;box-shadow:0 0 24px rgba(201,245,90,.45)}
 .scene[data-hot="1"] .goal-tag{opacity:1;transform:none}
-.wave{display:flex;align-items:flex-end;gap:3px;height:54px;padding:8px 14px 6px;background:var(--surface-2);border-top:1px solid var(--line)}
-.wave i{flex:1;height:100%;background:var(--brand);border-radius:2px;transform-origin:bottom;transform:scaleY(.15);opacity:.55}
-.scene[data-hot="1"] .wave i{background:var(--hl-line);opacity:1}
-.scene figcaption{padding:12px 14px 14px;font-size:.88rem;color:var(--muted);display:grid;gap:6px}
-.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0;padding:0;list-style:none;color:var(--muted);font-size:.84rem}
-.legend li{display:inline-flex;align-items:center;gap:7px}
-.sw{width:14px;height:14px;border-radius:4px;display:inline-block}
-.sw.cone{background:rgba(245,158,11,.35);border:1.5px dashed var(--hl-line)}
-.sw.ball{background:#fff;border:2px solid #222;border-radius:50%}
-.sw.wv{background:var(--brand)}
+.wave{display:flex;align-items:flex-end;gap:3px;height:52px;padding:10px 16px 8px;border-top:1px solid var(--line);background:linear-gradient(#0a0e12,#07090b)}
+.wave i{flex:1;height:100%;border-radius:2px;background:linear-gradient(to top,rgba(201,245,90,.18),rgba(201,245,90,.6));transform-origin:bottom;transform:scaleY(.15)}
+.scene[data-hot="1"] .wave i{background:linear-gradient(to top,rgba(201,245,90,.45),var(--volt))}
+.scene figcaption{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;padding:12px 16px 14px;border-top:1px solid var(--line);font-size:.8rem;color:var(--muted)}
+.legend{display:flex;gap:14px;margin:0;padding:0;list-style:none}
+.legend li{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+.sw.cone{background:rgba(201,245,90,.2);border:1px dashed var(--volt)}
+.sw.ball{background:#fff;border-radius:50%}
+.sw.wv{background:var(--volt)}
 @keyframes blink{to{visibility:hidden}}
 .led{animation:blink 1.4s steps(2,start) infinite}
 
 /* 촬영 장비 */
-.shoot-grid{display:grid;gap:22px}
-@media(min-width:820px){.shoot-grid{grid-template-columns:.9fr 1.1fr;gap:44px;align-items:center}}
-.gear{margin:0;overflow:hidden}
-.gear-media{position:relative;aspect-ratio:4/3;display:grid;place-items:center;background:linear-gradient(var(--sky-a),var(--sky-b));color:var(--ink)}
-.gear-media svg{width:min(62%,250px);height:auto}
-.gear-media img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
-.gear figcaption{padding:12px 16px;font-size:.88rem;color:var(--muted);border-top:1px solid var(--line)}
-.facts{list-style:none;margin:20px 0 0;padding:0;display:grid;gap:12px}
-.facts li{display:grid;grid-template-columns:40px 1fr;gap:12px;align-items:start}
-.facts .ic{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:var(--brand-soft);color:var(--brand-ink)}
-.facts b{display:block;line-height:1.4}
-.facts span{color:var(--muted);font-size:.95rem}
-.ic svg,.ico svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.shoot-grid{display:grid;gap:30px}
+@media(min-width:880px){.shoot-grid{grid-template-columns:1fr 1fr;gap:64px;align-items:center}}
+.gear{margin:0;overflow:hidden;border-radius:28px;border:1px solid var(--line);background:radial-gradient(70% 60% at 50% 40%,rgba(201,245,90,.12),transparent 70%),linear-gradient(#0e1317,#07090b)}
+.gear-media{aspect-ratio:5/4;display:grid;place-items:center}
+.gear-media svg{width:min(76%,320px);height:auto}
+.gear figcaption{display:flex;justify-content:space-between;gap:12px;padding:14px 18px;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+.gear figcaption b{color:var(--ink)}
+.facts{list-style:none;margin:28px 0 0;padding:0;border-top:1px solid var(--line)}
+.facts li{display:flex;gap:14px;padding:16px 0;border-bottom:1px solid var(--line)}
+.facts b{display:block;font-size:1rem;line-height:1.45;margin-bottom:2px}
+.facts span{color:var(--muted);font-size:.93rem}
 
-/* 여정 */
-.alt{background:var(--surface-2);border-block:1px solid var(--line)}
-.steps{list-style:none;margin:0;padding:0;display:grid;gap:14px}
-.step{position:relative;display:grid;grid-template-columns:52px 1fr;gap:2px 14px;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
-.step:not(:last-child)::after{content:"";position:absolute;left:41px;bottom:-15px;width:2px;height:15px;background:var(--line)}
-.step .ico{grid-row:span 3;width:52px;height:52px;border-radius:15px;display:grid;place-items:center;background:var(--brand-soft);color:var(--brand-ink)}
-.step[data-who=human] .ico{background:var(--hl-soft);color:var(--hl)}
-.step h3{font-size:1.06rem;display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.step p{margin:2px 0 0;color:var(--muted);font-size:.95rem}
-.step small{color:var(--muted);font-size:.8rem}
-.tag{display:inline-block;padding:1px 9px;border-radius:999px;font-size:.72rem;font-weight:800;background:var(--brand-soft);color:var(--brand-ink)}
-.step[data-who=human] .tag{background:var(--hl-soft);color:var(--hl)}
-.three{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 0;padding:0;list-style:none}
-.three li{padding:8px 14px;border-radius:999px;background:var(--hl-soft);color:var(--hl);font-weight:700;font-size:.9rem}
+/* 자동화 여정 */
+.steps{position:relative;list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.steps::before{content:"";position:absolute;left:21px;top:24px;bottom:24px;width:1px;background:linear-gradient(var(--amber),var(--volt) 30%,var(--volt) 75%,var(--amber))}
+.step{position:relative;display:grid;grid-template-columns:44px 1fr;gap:14px;align-items:start}
+.node{position:relative;z-index:1;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:var(--bg-2);border:1px solid var(--line-2);color:var(--volt)}
+.node svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.step.h .node{color:var(--amber);border-color:rgba(246,180,90,.4)}
+.step .body{padding:15px 17px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}
+.step h3{font-size:1.04rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.step h3 small{font:600 .72rem/1 var(--mono);color:var(--faint)}
+.step p{margin:5px 0 0;color:var(--muted);font-size:.94rem}
+.three{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:26px 0 0;padding:16px 18px;border-radius:18px;border:1px solid rgba(246,180,90,.25);background:var(--amber-soft);list-style:none;font-size:.9rem}
+.three b{color:var(--amber);margin-right:4px}
+.three li{color:var(--ink);font-weight:600}
+.three li+li::before{content:"·";margin-right:8px;color:var(--faint)}
 @media(min-width:900px){
   .steps{grid-template-columns:repeat(3,1fr);gap:16px}
-  .step{grid-template-columns:1fr;padding:20px}
-  .step .ico{grid-row:auto;margin-bottom:10px}
-  .step:not(:last-child)::after{display:none}
+  .steps::before{display:none}
+  .step{grid-template-columns:1fr;gap:0}
+  .step .body{padding:58px 22px 22px;height:100%}
+  .node{position:absolute;left:22px;top:-1px;transform:translateY(22px);z-index:2}
+  .step h3{margin-top:12px}
 }
 
 /* Drive 대기열 */
-.lanes{list-style:none;margin:0;padding:0;display:grid;gap:12px}
-.lane{position:relative;padding:14px 16px;background:var(--surface);border:2px solid var(--line);border-radius:16px;transition:border-color .3s,box-shadow .3s,transform .3s}
-.lane code{display:inline-flex;align-items:center;gap:8px;font:700 .95rem/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink)}
-.lane code svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--muted)}
-.lane p{margin:4px 0 0;color:var(--muted);font-size:.9rem}
-.lane .file{display:none;margin-top:8px;padding:3px 10px;border-radius:8px;background:var(--hl-soft);color:var(--hl);font-size:.78rem;font-weight:700;width:max-content}
-.lane.on{border-color:var(--brand);box-shadow:0 0 0 4px var(--brand-soft)}
+.lanes{list-style:none;margin:0;padding:0;display:grid;gap:14px}
+.lane{position:relative;padding:15px 17px;border:1px solid var(--line);border-radius:18px;background:var(--surface);transition:border-color .35s,box-shadow .35s,background .35s}
+.lane .fn{display:flex;align-items:center;gap:8px;font:600 .95rem/1.4 var(--mono)}
+.lane .fn svg{width:17px;height:17px;fill:none;stroke:var(--faint);stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.lane p{margin:5px 0 0;color:var(--muted);font-size:.9rem}
+.lane .file{display:none;margin-top:9px;padding:3px 10px;border-radius:8px;background:var(--amber-soft);color:var(--amber);font:600 .74rem/1.5 var(--mono);width:max-content}
+.lane.on{border-color:rgba(201,245,90,.7);background:linear-gradient(var(--volt-soft),transparent);box-shadow:0 0 30px -8px rgba(201,245,90,.35)}
+.lane.on .fn svg{stroke:var(--volt)}
 .lane.on .file{display:inline-block}
-.lane:not(:last-child)::after{content:"↓";position:absolute;left:50%;bottom:-19px;transform:translateX(-50%);color:var(--muted);font-weight:800;line-height:1}
+.lane:not(:last-child)::after{content:"";position:absolute;left:26px;bottom:-15px;width:1px;height:14px;background:var(--line-2)}
 .lane.fail{border-style:dashed}
 .lane.fail::after{display:none}
 @media(min-width:900px){
-  .lanes{grid-template-columns:repeat(4,1fr);gap:22px}
-  .lane:not(:last-child)::after{content:"→";left:auto;right:-18px;bottom:auto;top:50%;transform:translateY(-50%)}
+  .lanes{grid-template-columns:repeat(4,1fr);gap:18px}
+  .lane:not(:last-child)::after{left:auto;right:-18px;bottom:auto;top:50%;width:18px;height:1px}
   .lane.fail{grid-column:1/-1}
 }
-.note{margin:22px 0 0;padding:14px 16px;border-left:4px solid var(--hl-line);background:var(--hl-soft);border-radius:0 12px 12px 0;color:var(--ink);font-size:.95rem}
+.note{display:flex;gap:12px;margin:22px 0 0;padding:15px 17px;border-radius:16px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-size:.93rem}
+.note::before{content:"";flex:none;width:3px;border-radius:2px;background:var(--volt)}
 
-/* AI 단계 */
-.funnel{display:grid;gap:14px}
-@media(min-width:820px){.funnel{grid-template-columns:repeat(3,1fr)}}
-.stage{padding:18px}
-.stage .ico{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:var(--brand-soft);color:var(--brand-ink);margin-bottom:10px}
-.stage h3{font-size:1.05rem;margin-bottom:4px}
-.stage p{margin:0;color:var(--muted);font-size:.94rem}
-.stage .cost{margin-top:10px;display:inline-block;font-size:.78rem;font-weight:800;color:var(--brand-ink);background:var(--brand-soft);padding:2px 10px;border-radius:999px}
-.result{margin-top:18px;padding:18px}
-.result h3{font-size:1rem;margin-bottom:12px}
-.seg{display:flex;height:44px;border-radius:12px;overflow:hidden;font-weight:800;font-size:.85rem;line-height:44px;text-align:center;color:#fff}
+/* AI 판별 */
+.funnel{display:grid;gap:12px}
+@media(min-width:880px){.funnel{grid-template-columns:repeat(3,1fr);gap:16px}}
+.stage{position:relative;overflow:hidden;padding:22px}
+.stage .n{position:absolute;right:16px;top:6px;font-size:4.4rem;font-weight:800;letter-spacing:-.06em;line-height:1;color:rgba(255,255,255,.05)}
+.stage .ic{margin-bottom:16px}
+.stage h3{font-size:1.1rem;margin-bottom:6px}
+.stage p{margin:0;color:var(--muted);font-size:.93rem}
+.cost{display:inline-block;margin-top:14px;padding:3px 10px;border-radius:999px;border:1px solid rgba(201,245,90,.3);color:var(--volt);font-size:.74rem;font-weight:700}
+.result{margin-top:14px;padding:22px}
+.result h3{font-size:1rem;margin-bottom:14px}
+.result h3 small{font-weight:500;color:var(--faint);margin-left:6px}
+.seg{display:flex;height:46px;border-radius:12px;overflow:hidden;font-weight:800;font-size:.86rem;line-height:46px;text-align:center}
 .seg span{white-space:nowrap;overflow:hidden}
-.seg .a{background:var(--brand);color:var(--on-brand)}
-.seg .m{background:var(--hl-line);color:#2a1a00}
-.seg .x{background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
-.result ul{margin:14px 0 0;padding:0;list-style:none;display:grid;gap:6px;color:var(--muted);font-size:.9rem}
+.seg .a{background:var(--volt);color:var(--volt-ink)}
+.seg .m{background:var(--amber);color:#2a1a00}
+.seg .x{background:var(--surface-2);color:var(--muted)}
+.result ul{margin:16px 0 0;padding:0;list-style:none;display:grid;gap:8px;color:var(--muted);font-size:.9rem}
 .result b{color:var(--ink)}
-.dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:7px;vertical-align:-1px}
-.dot.a{background:var(--brand)}.dot.m{background:var(--hl-line)}.dot.x{background:var(--surface-2);border:1px solid var(--muted)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:0}
+.dot.a{background:var(--volt)}.dot.m{background:var(--amber)}.dot.x{background:var(--surface-2);border:1px solid var(--line-2)}
 
 /* 샘플 */
-.sub{margin:38px 0 14px;font-size:1.15rem}
-.vgrid{display:grid;grid-auto-flow:column;grid-auto-columns:84%;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -16px;padding:2px 16px 14px;scrollbar-width:none}
+.sub{display:flex;align-items:center;gap:8px;margin:44px 0 14px;font-size:1.12rem}
+.sub:first-of-type{margin-top:0}
+.hint{margin:-4px 0 12px;color:var(--faint);font-size:.82rem}
+@media(min-width:900px){.hint{display:none}}
+.vgrid{display:grid;grid-auto-flow:column;grid-auto-columns:86%;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;margin:0 -16px;padding:0 16px 6px;scroll-padding:0 16px;scrollbar-width:none}
 .vgrid::-webkit-scrollbar{display:none}
-.vcard{scroll-snap-align:center;overflow:hidden}
+.vcard{scroll-snap-align:start;overflow:hidden}
 @media(min-width:900px){.vgrid{grid-auto-flow:row;grid-template-columns:repeat(3,1fr);grid-auto-columns:auto;overflow:visible;margin:0;padding:0}}
 .frame{position:relative;aspect-ratio:16/9;background:#000}
 .frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
-.yt{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;cursor:pointer;background:#000;display:block}
-.yt img{width:100%;height:100%;object-fit:cover;opacity:.92}
-.yt .play{position:absolute;left:50%;top:50%;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:rgba(255,255,255,.94);display:grid;place-items:center;box-shadow:0 4px 18px rgba(0,0,0,.4)}
-.yt .play::before{content:"";margin-left:5px;border-style:solid;border-width:11px 0 11px 18px;border-color:transparent transparent transparent #14201a}
-.vmeta{padding:12px 14px 14px}
+.yt{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;cursor:pointer;background:#000;overflow:hidden}
+.yt img{width:100%;height:100%;object-fit:cover;opacity:.82;transition:opacity .3s,transform .7s}
+.yt:hover img{opacity:1;transform:scale(1.04)}
+.yt::after{content:"";position:absolute;inset:0;background:linear-gradient(transparent 55%,rgba(0,0,0,.55))}
+.yt .play{position:absolute;left:50%;top:50%;z-index:1;width:58px;height:58px;margin:-29px 0 0 -29px;border-radius:50%;background:rgba(255,255,255,.92);display:grid;place-items:center;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.yt .play::before{content:"";margin-left:4px;border-style:solid;border-width:10px 0 10px 16px;border-color:transparent transparent transparent #0a0d06}
+.vmeta{padding:14px 16px 16px}
 .vmeta b{display:block;font-size:.95rem;line-height:1.4}
 .vmeta span{color:var(--muted);font-size:.84rem}
+.pair{display:grid;gap:8px}
+@media(min-width:900px){.pair{grid-template-columns:1fr 1fr;gap:24px;align-items:start}.pair .sub{margin-top:44px}}
 .v2d{overflow:hidden}
-.v2d video{width:100%;height:auto;background:#2f7d3f;aspect-ratio:960/596}
-.pair{display:grid;gap:18px}
-@media(min-width:900px){.pair{grid-template-columns:1fr 1fr;align-items:start}}
-pre.desc{margin:0;padding:16px;background:var(--surface-2);border-radius:14px;overflow-x:auto;font:.84rem/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,"Malgun Gothic",monospace;color:var(--ink);white-space:pre-wrap;word-break:break-all}
-.phones{display:grid;gap:22px;justify-items:center}
-@media(min-width:760px){.phones{grid-template-columns:auto auto;justify-content:center;gap:48px;align-items:center}}
-.phone{width:min(290px,100%);aspect-ratio:9/17;border-radius:38px;padding:10px;background:#111a15;box-shadow:var(--shadow),0 0 0 2px #2a3a31 inset}
-.screen{height:100%;border-radius:30px;padding:36px 14px 18px;background:linear-gradient(160deg,#233b57,#14202f 70%);color:#fff;display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden}
-.screen::before{content:"";position:absolute;top:10px;left:50%;width:76px;height:20px;margin-left:-38px;border-radius:999px;background:#0a110d}
-.clock{font:700 2.6rem/1.1 -apple-system,Arial,sans-serif;text-align:center;margin-top:8px}
-.date{text-align:center;font-size:.85rem;opacity:.8;margin-bottom:18px}
-.notif{background:rgba(255,255,255,.16);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-radius:16px;padding:10px 12px;font-size:.78rem;line-height:1.5;border:1px solid rgba(255,255,255,.12)}
-.notif .nh{display:flex;justify-content:space-between;opacity:.75;font-size:.7rem;margin-bottom:2px;font-weight:700}
+.v2d video{width:100%;height:auto;aspect-ratio:960/596;background:#2f7d3f}
+pre.desc{margin:0;padding:18px;border-radius:18px;border:1px solid var(--line);background:var(--bg-2);overflow-x:auto;font:.84rem/1.75 var(--mono);color:var(--ink);white-space:pre-wrap;word-break:break-all}
+pre.desc .t{color:var(--volt)}
+pre.desc .c{color:var(--faint)}
+.small{margin:10px 0 0;color:var(--faint);font-size:.84rem}
+.phones{display:grid;gap:24px;justify-items:center}
+@media(min-width:760px){.phones{grid-template-columns:auto auto;justify-content:center;gap:56px;align-items:center}}
+.phone{width:min(282px,86vw);aspect-ratio:9/18;border-radius:44px;padding:9px;background:#0b0d10;border:1px solid rgba(255,255,255,.14);box-shadow:0 50px 90px -30px rgba(0,0,0,.95),0 0 70px -10px rgba(201,245,90,.08)}
+.screen{position:relative;height:100%;overflow:hidden;border-radius:36px;padding:44px 14px 18px;color:#fff;background:radial-gradient(120% 70% at 30% 0%,#2a4870,transparent 60%),linear-gradient(170deg,#152238,#070b12 75%)}
+.screen::before{content:"";position:absolute;top:11px;left:50%;width:82px;height:22px;margin-left:-41px;border-radius:999px;background:#000}
+.clock{text-align:center;font:200 3.4rem/1 "Pretendard Variable",-apple-system,Arial,sans-serif;letter-spacing:-.02em;margin-top:6px}
+.date{text-align:center;font-size:.86rem;opacity:.75;margin:6px 0 22px}
+.notif{border-radius:20px;padding:11px 13px;background:rgba(255,255,255,.14);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1);font-size:.78rem;line-height:1.5}
+.notif .nh{display:flex;justify-content:space-between;align-items:center;font-size:.7rem;opacity:.7;font-weight:700;margin-bottom:3px}
+.notif .nh span:first-child::before{content:"";display:inline-block;width:14px;height:14px;border-radius:4px;background:#2e7d5b;vertical-align:-3px;margin-right:6px}
 .notif b{display:block;font-size:.84rem}
-.notif p{margin:4px 0 0;opacity:.92;word-break:break-all}
-.band{width:min(320px,100%);padding:0;overflow:hidden}
-.band .bh{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:800}
-.band .bh span{font-weight:600;color:var(--brand-ink);font-size:.88rem}
-.band .bb{padding:16px;font-size:.92rem;line-height:1.7;word-break:break-all}
-.band .bb u{text-decoration-color:var(--brand)}
-.band .bf{padding:10px 16px 14px;color:var(--muted);font-size:.8rem}
-.arrow{font-weight:800;color:var(--hl);text-align:center;font-size:.9rem}
+.notif p{margin:4px 0 0;opacity:.9;word-break:break-all}
+.paste{width:min(320px,100%)}
+.arrow{margin:0 0 12px;text-align:center;font-size:.86rem;font-weight:700;color:var(--amber)}
+.band{overflow:hidden}
+.band .bh{display:flex;justify-content:space-between;align-items:center;padding:13px 17px;border-bottom:1px solid var(--line);font-weight:700}
+.band .bh span{font-size:.8rem;color:var(--faint);font-weight:600}
+.band .bb{padding:17px;font-size:.92rem;line-height:1.75;word-break:break-all}
+.band .bb u{color:var(--volt);text-decoration-color:rgba(201,245,90,.4)}
+.band .bf{display:flex;justify-content:space-between;align-items:center;padding:12px 17px 14px;color:var(--faint);font-size:.8rem;border-top:1px solid var(--line)}
+.band .bf i{font-style:normal;padding:6px 14px;border-radius:999px;background:var(--volt);color:var(--volt-ink);font-weight:800}
 
-/* 숫자 */
-.tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
-@media(min-width:760px){.tiles{grid-template-columns:repeat(4,1fr)}}
-.tile{padding:18px 14px;text-align:center}
-.tile b{display:block;font-size:clamp(1.5rem,6vw,2rem);letter-spacing:-.02em;color:var(--brand)}
-.tile span{color:var(--muted);font-size:.88rem;line-height:1.4;display:block;margin-top:2px}
-table{width:100%;border-collapse:collapse;font-size:.95rem}
-caption{text-align:left;color:var(--muted);font-size:.85rem;padding-bottom:10px}
-th,td{padding:12px 8px;border-bottom:1px solid var(--line);text-align:left}
-th{color:var(--muted);font-weight:700;font-size:.82rem}
-td:last-child,th:last-child{text-align:right;white-space:nowrap}
-.tbl{padding:8px 16px 14px;margin-top:14px}
-.chips{display:flex;flex-wrap:wrap;gap:8px;margin:0;padding:0;list-style:none}
-.chips li{padding:6px 14px;border-radius:999px;background:var(--surface);border:1px solid var(--line);font-size:.88rem;font-weight:600}
+/* 비용·시간 */
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);overflow:hidden}
+.tile{padding:20px 12px;text-align:center}
+.tile+.tile{border-left:1px solid var(--line)}
+.tile b{display:block;font-size:clamp(1.35rem,6vw,2.2rem);letter-spacing:-.04em;line-height:1.2;color:var(--volt);font-variant-numeric:tabular-nums}
+.tile span{display:block;margin-top:4px;color:var(--muted);font-size:.8rem;line-height:1.4}
+.tbl{margin-top:14px;padding:6px 18px 10px}
+table{width:100%;border-collapse:collapse;font-size:.94rem}
+caption{text-align:left;color:var(--faint);font-size:.82rem;padding:14px 0 6px}
+th,td{padding:13px 0;border-bottom:1px solid var(--line);text-align:left}
+tr:last-child td{border-bottom:0}
+th{color:var(--faint);font-weight:600;font-size:.8rem}
+td:last-child,th:last-child{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+td:last-child{color:var(--volt);font-weight:700}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0;padding:0;list-style:none}
+.chips li{padding:7px 14px;border-radius:999px;border:1px solid var(--line-2);font-size:.86rem;font-weight:600;color:var(--muted)}
+.chips li.paid{border-color:rgba(246,180,90,.4);color:var(--amber)}
 
 /* 한계 */
-.lim{display:grid;gap:12px}
-@media(min-width:820px){.lim{grid-template-columns:1fr 1fr}}
-.lim li{list-style:none;padding:16px 18px}
-.lim b{display:block;margin-bottom:2px}
-.lim span{color:var(--muted);font-size:.94rem}
-.lim ul{display:contents;margin:0;padding:0}
+.lim{display:grid;gap:12px;margin:0;padding:0;list-style:none}
+@media(min-width:880px){.lim{grid-template-columns:1fr 1fr;gap:16px}}
+.lim li{padding:20px;display:flex;gap:14px}
+.lim .n{flex:none;font:600 .8rem/1.9 var(--mono);color:var(--amber)}
+.lim b{display:block;margin-bottom:3px}
+.lim span{color:var(--muted);font-size:.93rem}
 
-footer{padding:44px 0 calc(44px + env(safe-area-inset-bottom));border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
-footer .cta{margin-bottom:22px}
-footer p{margin:0 0 6px}
+/* 마무리 */
+.closing{padding:96px 0 84px;text-align:center;border-top:1px solid var(--line);background:radial-gradient(600px 300px at 50% 100%,rgba(201,245,90,.09),transparent 70%)}
+.closing h2{font-size:clamp(2.6rem,13vw,5rem);line-height:1.04;letter-spacing:-.05em}
+.closing p{margin:16px auto 0;color:var(--muted);max-width:34ch}
+.closing .cta{justify-content:center}
+footer{padding:28px 0 calc(32px + env(safe-area-inset-bottom));border-top:1px solid var(--line);color:var(--faint);font-size:.82rem}
+footer .wrap{display:grid;gap:4px}
+footer p{margin:0}
 
 @media(prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
@@ -257,158 +295,177 @@ footer p{margin:0 0 6px}
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
   <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 10v4h3.5L12 18V6L7.5 10z"/><path d="M15.5 9.5a3.5 3.5 0 0 1 0 5M18 7a7 7 0 0 1 0 10"/></symbol>
   <symbol id="i-pan" viewBox="0 0 24 24"><path d="M3 12h18M6.5 8.5 3 12l3.5 3.5M17.5 8.5 21 12l-3.5 3.5"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></symbol>
   <symbol id="i-merge" viewBox="0 0 24 24"><path d="M4 6h6a4 4 0 0 1 4 4v8M20 6h-2a4 4 0 0 0-4 4M11 15l3 3 3-3"/></symbol>
 </svg>
 
 <header class="top">
   <div class="wrap bar">
     <a class="brand" href="#top"><i>HL</i>HLEditor</a>
-    <a class="gh" href="https://github.com/sampark0626/HLEditor" rel="noopener">GitHub</a>
     <nav class="nav" aria-label="바로가기">
       <a href="#shoot">촬영</a><a href="#journey">자동화 여정</a><a href="#drive">Drive 대기열</a><a href="#ai">AI 판별</a><a href="#samples">샘플</a><a href="#numbers">비용·시간</a>
     </nav>
+    <a class="gh" href="https://github.com/sampark0626/HLEditor" rel="noopener">GitHub <span>↗</span></a>
   </div>
 </header>
 
 <main>
-<!-- ── 히어로 ─────────────────────────────── -->
+<!-- 히어로 -->
 <section class="hero">
   <div class="wrap hero-grid">
-    <div>
-      <p class="eyebrow">동호회 축구 · 완전 자동 하이라이트</p>
-      <h1>경기 영상을 올리면,<br>하이라이트가 <em>알림</em>으로 와요</h1>
+    <div class="hero-copy">
+      <p class="badge"><i></i>동호회 축구 · 완전 자동 하이라이트</p>
+      <h1>경기 영상을 올리면,<br><span class="hl">하이라이트</span>가<br>알림으로 와요</h1>
+    </div>
+
+    <figure class="scene" id="sceneFig" data-hot="0">
+      <div class="scene-box">
+        <svg id="scene" viewBox="0 0 360 330" role="img" aria-label="야간 조명이 켜진 경기장 옆 삼각대에 세운 카메라가 공을 따라 좌우로 움직이며 경기를 촬영하는 그림"></svg>
+        <span class="rec"><i></i>REC <span id="tc">00:42:17</span></span>
+        <span class="goal-tag">하이라이트 후보</span>
+      </div>
+      <div class="wave" id="wave" aria-hidden="true"></div>
+      <figcaption>
+        <span>환호가 커지는 순간이 후보가 돼요</span>
+        <ul class="legend" aria-hidden="true">
+          <li><i class="sw cone"></i>촬영 범위</li>
+          <li><i class="sw ball"></i>공</li>
+          <li><i class="sw wv"></i>소리</li>
+        </ul>
+      </figcaption>
+    </figure>
+
+    <div class="hero-sub">
       <p class="lead">폰으로 영상만 올리면 AI가 골·슈팅 장면을 골라 YouTube에 올리고, BAND에 붙여넣을 글까지 만들어 알려 줘요. 서버도, 켜 둔 PC도 필요 없어요.</p>
       <div class="cta">
         <a class="btn primary" href="#journey">자동화 여정 보기</a>
         <a class="btn ghost" href="#samples">샘플 보기</a>
       </div>
+      <ul class="hero-stats">
+        <li><b>3번</b><span>사람이 하는 일</span></li>
+        <li><b>1통</b><span>도착하는 알림</span></li>
+        <li><b>0대</b><span>운영하는 서버</span></li>
+      </ul>
     </div>
-
-    <figure class="scene" id="sceneFig" data-hot="0">
-      <div class="scene-box">
-        <svg id="scene" viewBox="0 0 360 330" role="img" aria-label="경기장 옆 삼각대에 세운 카메라가 공을 따라 좌우로 움직이며 경기를 촬영하는 그림"></svg>
-        <span class="rec"><i></i>REC</span>
-        <span class="goal-tag">⚽ 골 찬스!</span>
-      </div>
-      <div class="wave" id="wave" aria-hidden="true"></div>
-      <figcaption>
-        <span>카메라가 공을 따라 움직이고, 환호 소리가 커지면 그 순간이 <b>하이라이트 후보</b>가 돼요.</span>
-        <ul class="legend" aria-hidden="true">
-          <li><i class="sw cone"></i>카메라가 찍는 범위</li>
-          <li><i class="sw ball"></i>공</li>
-          <li><i class="sw wv"></i>소리 크기</li>
-        </ul>
-      </figcaption>
-    </figure>
   </div>
 </section>
 
-<!-- ── 촬영 ─────────────────────────────── -->
+<!-- 촬영 -->
 <section class="section" id="shoot">
   <div class="wrap shoot-grid">
-    <figure class="gear card reveal">
+    <figure class="gear reveal">
       <div class="gear-media">
-        <svg viewBox="0 0 240 260" role="img" aria-label="삼각대 위에 올린 자동 추적 카메라 그림">
-          <ellipse cx="120" cy="248" rx="74" ry="7" fill="currentColor" opacity=".1"/>
-          <g stroke="var(--tripod)" stroke-width="7" stroke-linecap="round"><path d="M120 150 62 244"/><path d="M120 150 178 244"/><path d="M120 150v96"/></g>
-          <rect x="113" y="112" width="14" height="44" rx="5" fill="var(--tripod)"/>
-          <ellipse cx="120" cy="114" rx="32" ry="8" fill="var(--cam-2)"/>
-          <rect x="60" y="44" width="120" height="68" rx="18" fill="var(--cam)"/>
-          <circle cx="120" cy="78" r="27" fill="var(--cam-2)"/>
-          <circle cx="120" cy="78" r="19" fill="#0e1a14"/>
-          <circle cx="120" cy="78" r="10" fill="#2b4a7a"/>
-          <circle cx="114" cy="72" r="3.2" fill="#fff" opacity=".85"/>
-          <circle cx="164" cy="60" r="3.6" fill="#ef4444" class="led"/>
-          <g fill="none" stroke="var(--hl-line)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M46 78H20M28 69l-8 9 8 9"/><path d="M194 78h26M212 69l8 9-8 9"/></g>
-        </svg>      </div>
-      <figcaption>XbotGo 자동 추적 카메라 — 삼각대에 올려 두면 공을 따라 좌우로 움직여요.</figcaption>
+        <svg viewBox="0 0 260 250" role="img" aria-label="삼각대 위에 올린 자동 추적 카메라 그림">
+          <defs>
+            <linearGradient id="gb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#323840"/><stop offset=".55" stop-color="#1a1e23"/><stop offset="1" stop-color="#0f1215"/></linearGradient>
+            <radialGradient id="gl" cx=".36" cy=".32" r=".75"><stop offset="0" stop-color="#bfe0ff"/><stop offset=".35" stop-color="#3f7fd6"/><stop offset=".75" stop-color="#0d1d3a"/><stop offset="1" stop-color="#05080f"/></radialGradient>
+            <linearGradient id="gt" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1f2328"/><stop offset=".5" stop-color="#4d555e"/><stop offset="1" stop-color="#1b1f23"/></linearGradient>
+            <radialGradient id="gf" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#c9f55a" stop-opacity=".3"/><stop offset="1" stop-color="#c9f55a" stop-opacity="0"/></radialGradient>
+          </defs>
+          <ellipse cx="130" cy="232" rx="112" ry="14" fill="url(#gf)"/>
+          <g stroke="url(#gt)" stroke-width="6" stroke-linecap="round"><path d="M130 150 70 232"/><path d="M130 150 190 232"/><path d="M130 150v84"/></g>
+          <rect x="123" y="114" width="14" height="42" rx="4" fill="url(#gt)"/>
+          <ellipse cx="130" cy="115" rx="34" ry="8" fill="#1a1e23" stroke="rgba(255,255,255,.12)"/>
+          <rect x="66" y="40" width="128" height="72" rx="20" fill="url(#gb)" stroke="rgba(255,255,255,.15)"/>
+          <path d="M88 41.2h84" stroke="rgba(255,255,255,.3)" stroke-linecap="round"/>
+          <rect x="104" y="103" width="52" height="3" rx="1.5" fill="#c9f55a"/>
+          <circle cx="130" cy="74" r="28" fill="#0c0f12" stroke="rgba(255,255,255,.16)" stroke-width="1.5"/>
+          <circle cx="130" cy="74" r="21" fill="#05070a" stroke="#2c3238"/>
+          <circle cx="130" cy="74" r="14.5" fill="url(#gl)"/>
+          <ellipse cx="124.5" cy="68.5" rx="4.2" ry="2.5" fill="#fff" opacity=".85" transform="rotate(-30 124.5 68.5)"/>
+          <circle cx="175" cy="55" r="7" fill="#ff4d4d" opacity=".18" class="led"/><circle cx="175" cy="55" r="3" fill="#ff4d4d"/>
+          <path d="M56 130Q130 162 204 130" fill="none" stroke="#c9f55a" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="3 6" opacity=".85"/>
+          <g fill="none" stroke="#c9f55a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M63 122l-7 8 9 4"/><path d="M197 122l7 8-9 4"/></g>
+        </svg>
+      </div>
+      <figcaption><b>XbotGo 자동 추적 카메라</b><span>삼각대 + 좌우 자동 패닝</span></figcaption>
     </figure>
 
     <div class="reveal">
-      <p class="eyebrow">1 · 촬영</p>
+      <p class="kicker"><b>01</b>촬영</p>
       <h2>카메라가 알아서<br>공을 따라가요</h2>
-      <p class="lead" style="max-width:48ch">삼각대에 세우고 녹화 버튼만 누르면 끝이에요. 그런데 이 “카메라가 어디를 보고 있는가”가 하이라이트를 찾는 단서가 돼요.</p>
+      <p class="lead" style="max-width:46ch">삼각대에 세우고 녹화 버튼만 누르면 끝이에요. 그런데 “카메라가 어디를 보고 있는가”가 하이라이트를 찾는 단서가 돼요.</p>
       <ul class="facts">
-        <li><span class="ic"><svg><use href="#i-pan"/></svg></span><div><b>골문 앞에서 멈추면 → 득점 기회</b><span>카메라가 한쪽 골대 앞에 머무는 순간에 가산점을 줘요.</span></div></li>
-        <li><span class="ic"><svg><use href="#i-pan"/></svg></span><div><b>빠르게 휙 돌면 → 역습</b><span>카메라의 움직임 속도도 장면을 읽는 신호예요.</span></div></li>
+        <li><span class="ic"><svg><use href="#i-target"/></svg></span><div><b>골문 앞에서 멈추면 → 득점 기회</b><span>카메라가 한쪽 골대 앞에 머무는 순간에 가산점을 줘요.</span></div></li>
+        <li><span class="ic"><svg><use href="#i-pan"/></svg></span><div><b>빠르게 휙 돌면 → 역습</b><span>카메라가 움직이는 속도도 장면을 읽는 신호예요.</span></div></li>
         <li><span class="ic"><svg><use href="#i-merge"/></svg></span><div><b>30분씩 끊긴 파일도 한 경기로</b><span>녹화 시작 시각과 길이로 이어 붙일 파일을 알아서 찾아요.</span></div></li>
       </ul>
     </div>
   </div>
 </section>
 
-<!-- ── 자동화 여정 ─────────────────────────── -->
-<section class="section alt" id="journey">
+<!-- 자동화 여정 -->
+<section class="section" id="journey">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">2 · 자동화 여정</p>
-      <h2>사람은 세 번,<br>나머지는 자동이에요</h2>
-      <p>촬영부터 BAND에 올리기 직전까지의 흐름이에요. 서버는 한 대도 없이 Google Drive · Apps Script · Kaggle · YouTube · ntfy를 이어 붙였어요.</p>
+      <p class="kicker"><b>02</b>자동화 여정</p>
+      <h2>사람은 세 번,<br><span class="hl">나머지는 자동</span>이에요</h2>
+      <p>촬영부터 BAND에 올리기 직전까지. 서버 한 대 없이 Google Drive · Apps Script · Kaggle · YouTube · ntfy를 이어 붙였어요.</p>
     </div>
     <ol class="steps">
-      <li class="step reveal" data-who="human"><span class="ico"><svg><use href="#i-camera"/></svg></span>
-        <h3>촬영 <span class="tag">사람</span></h3>
-        <p>삼각대에 카메라를 세우고 녹화 버튼을 눌러요.</p></li>
-      <li class="step reveal" data-who="human"><span class="ico"><svg><use href="#i-phone"/></svg></span>
-        <h3>폰으로 업로드 <span class="tag">사람</span></h3>
-        <p>Drive 앱으로 <code>00_upload</code>에 올리고, 다 올라가면 <code>01_inbox</code>로 옮겨요.</p></li>
-      <li class="step reveal" data-who="auto"><span class="ico"><svg><use href="#i-clock"/></svg></span>
-        <h3>영상 발견 <span class="tag">자동</span></h3>
-        <p>Apps Script가 일·월요일엔 5분마다, 평소엔 1시간마다 폴더를 확인하고 영상이 있으면 Kaggle을 켜요.</p></li>
-      <li class="step reveal" data-who="auto"><span class="ico"><svg><use href="#i-cloud"/></svg></span>
-        <h3>분석과 편집 <span class="tag">자동</span></h3>
-        <p>Kaggle 노트북이 영상을 이어 붙이고, 소리·카메라 움직임·AI로 장면을 골라 하이라이트를 만들어요.</p></li>
-      <li class="step reveal" data-who="auto"><span class="ico"><svg><use href="#i-play"/></svg></span>
-        <h3>YouTube 업로드 <span class="tag">자동</span></h3>
-        <p>제목, 득점 챕터, 썸네일까지 붙여서 올려요.</p></li>
-      <li class="step reveal" data-who="human"><span class="ico"><svg><use href="#i-bell"/></svg></span>
-        <h3>알림 → BAND <span class="tag">사람</span></h3>
-        <p>알림이 한 통 오면 눌러서 복사하고, BAND에 붙여넣으면 끝이에요.</p></li>
+      <li class="step h reveal"><span class="node"><svg><use href="#i-camera"/></svg></span><div class="body">
+        <h3><small>01</small>촬영 <span class="tag h">사람</span></h3>
+        <p>삼각대에 카메라를 세우고 녹화 버튼을 눌러요.</p></div></li>
+      <li class="step h reveal"><span class="node"><svg><use href="#i-phone"/></svg></span><div class="body">
+        <h3><small>02</small>폰으로 업로드 <span class="tag h">사람</span></h3>
+        <p>Drive 앱으로 <code>00_upload</code>에 올리고, 다 올라가면 <code>01_inbox</code>로 옮겨요.</p></div></li>
+      <li class="step reveal"><span class="node"><svg><use href="#i-clock"/></svg></span><div class="body">
+        <h3><small>03</small>영상 발견 <span class="tag">자동</span></h3>
+        <p>Apps Script가 일·월요일엔 5분마다, 평소엔 1시간마다 폴더를 보고 영상이 있으면 Kaggle을 켜요.</p></div></li>
+      <li class="step reveal"><span class="node"><svg><use href="#i-cloud"/></svg></span><div class="body">
+        <h3><small>04</small>분석과 편집 <span class="tag">자동</span></h3>
+        <p>Kaggle 노트북이 영상을 이어 붙이고, 소리·카메라 움직임·AI로 장면을 골라 하이라이트를 만들어요.</p></div></li>
+      <li class="step reveal"><span class="node"><svg><use href="#i-play"/></svg></span><div class="body">
+        <h3><small>05</small>YouTube 업로드 <span class="tag">자동</span></h3>
+        <p>제목, 득점 챕터, 썸네일까지 붙여서 올려요.</p></div></li>
+      <li class="step h reveal"><span class="node"><svg><use href="#i-bell"/></svg></span><div class="body">
+        <h3><small>06</small>알림 → BAND <span class="tag h">사람</span></h3>
+        <p>알림이 한 통 오면 눌러서 복사하고, BAND에 붙여넣으면 끝이에요.</p></div></li>
     </ol>
     <ul class="three reveal" aria-label="사람이 하는 일 세 가지">
-      <li>① 녹화 버튼</li><li>② 폰에서 업로드·이동</li><li>③ BAND에 붙여넣기</li>
+      <li><b>사람이 하는 일</b></li><li>녹화 버튼</li><li>업로드·이동</li><li>붙여넣기</li>
     </ul>
   </div>
 </section>
 
-<!-- ── Drive 대기열 ───────────────────────── -->
+<!-- Drive 대기열 -->
 <section class="section" id="drive">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">Google Drive가 곧 대기열</p>
+      <p class="kicker"><b>03</b>Google Drive가 곧 대기열</p>
       <h2>폴더 이름이<br>진행 상태예요</h2>
-      <p>별도 서버나 데이터베이스 없이, 파일이 어느 폴더에 있는지만 보면 지금 무슨 일이 일어나는지 알 수 있어요.</p>
+      <p>서버도 데이터베이스도 없어요. 파일이 어느 폴더에 있는지만 보면 지금 무슨 일이 일어나는지 알 수 있어요.</p>
     </div>
     <ol class="lanes reveal">
-      <li class="lane" data-seq><code><svg><use href="#i-folder"/></svg>00_upload</code><p>업로드 대기 장소. 느리게 올려도 처리가 먼저 시작되지 않아요.</p><span class="file">🎞 경기.mp4</span></li>
-      <li class="lane" data-seq><code><svg><use href="#i-folder"/></svg>01_inbox</code><p>여기로 옮기면 출발. 일·월요일엔 최대 5분 안에 알아채요.</p><span class="file">🎞 경기.mp4</span></li>
-      <li class="lane" data-seq><code><svg><use href="#i-folder"/></svg>02_processing</code><p>Kaggle이 가져가서 처리 중. 같은 영상을 두 번 처리하지 않아요.</p><span class="file">🎞 경기.mp4</span></li>
-      <li class="lane" data-seq><code><svg><use href="#i-folder"/></svg>03_done</code><p>처리가 끝난 원본. 7일 뒤 Drive 휴지통으로 가요.</p><span class="file">🎞 경기.mp4</span></li>
-      <li class="lane fail"><code><svg><use href="#i-folder"/></svg>04_failed</code><p>세 번 실패한 원본이 여기 와요. <code style="display:inline;font-size:.85rem">01_inbox</code>로 다시 옮기면 처음부터 다시 시도해요.</p></li>
+      <li class="lane" data-seq><span class="fn"><svg><use href="#i-folder"/></svg>00_upload</span><p>업로드 대기 장소. 천천히 올려도 처리가 먼저 시작되지 않아요.</p><span class="file">경기_1.mp4</span></li>
+      <li class="lane" data-seq><span class="fn"><svg><use href="#i-folder"/></svg>01_inbox</span><p>여기로 옮기면 출발. 일·월요일엔 최대 5분 안에 알아채요.</p><span class="file">경기_1.mp4</span></li>
+      <li class="lane" data-seq><span class="fn"><svg><use href="#i-folder"/></svg>02_processing</span><p>Kaggle이 가져가서 처리 중. 같은 영상을 두 번 처리하지 않아요.</p><span class="file">경기_1.mp4</span></li>
+      <li class="lane" data-seq><span class="fn"><svg><use href="#i-folder"/></svg>03_done</span><p>처리가 끝난 원본. 7일 뒤 Drive 휴지통으로 가요.</p><span class="file">경기_1.mp4</span></li>
+      <li class="lane fail"><span class="fn"><svg><use href="#i-folder"/></svg>04_failed</span><p>세 번 실패한 원본이 와요. <code>01_inbox</code>로 다시 옮기면 처음부터 다시 시도해요.</p></li>
     </ol>
-    <p class="note reveal">처리 도중 Kaggle이 꺼져도 영상은 <code>02_processing</code>에 그대로 남아 있어서, 다음 실행이 이어서 처리해요.</p>
+    <p class="note reveal">처리 도중 Kaggle이 꺼져도 영상은 02_processing에 그대로 남아 있어서, 다음 실행이 이어서 처리해요.</p>
   </div>
 </section>
 
-<!-- ── AI 판별 ─────────────────────────────── -->
-<section class="section alt" id="ai">
+<!-- AI 판별 -->
+<section class="section" id="ai">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">3 · AI 판별</p>
+      <p class="kicker"><b>04</b>AI 판별</p>
       <h2>싼 것부터 거르고,<br>비싼 건 마지막에</h2>
-      <p>경기 한 편(30분)을 AI가 통째로 보면 비싸고 느려요. 그래서 공짜인 신호로 먼저 줄이고, 남은 장면만 AI가 확인해요.</p>
+      <p>30분 경기를 AI가 통째로 보면 비싸고 느려요. 공짜인 신호로 먼저 줄이고, 남은 장면만 AI가 확인해요.</p>
     </div>
     <div class="funnel">
-      <article class="card stage reveal"><span class="ico"><svg><use href="#i-vol"/></svg></span>
-        <h3>① 소리</h3><p>환호·함성이 평소보다 갑자기 커진 순간을 찾아요. 빠르고 공짜예요.</p><span class="cost">무료 · 로컬 계산</span></article>
-      <article class="card stage reveal"><span class="ico"><svg><use href="#i-pan"/></svg></span>
-        <h3>② 카메라 움직임</h3><p>골문 앞에서 멈췄거나 빠르게 돈 후보에 가산점(+0.10)을 줘요. 감점은 없어요.</p><span class="cost">무료 · 로컬 계산</span></article>
-      <article class="card stage reveal"><span class="ico"><svg><use href="#i-eye"/></svg></span>
-        <h3>③ AI의 눈</h3><p>후보 구간의 화면을 Gemini가 보고 골·슈팅·세이브인지, 얼마나 확실한지 판단해요.</p><span class="cost">경기당 약 $0.1</span></article>
+      <article class="card stage reveal"><span class="n">1</span><span class="ic"><svg><use href="#i-vol"/></svg></span>
+        <h3>소리</h3><p>환호·함성이 평소보다 갑자기 커진 순간을 찾아요.</p><span class="cost">무료 · 로컬 계산</span></article>
+      <article class="card stage reveal"><span class="n">2</span><span class="ic"><svg><use href="#i-pan"/></svg></span>
+        <h3>카메라 움직임</h3><p>골문 앞에서 멈췄거나 빠르게 돈 후보에 가산점(+0.10)을 줘요. 감점은 없어요.</p><span class="cost">무료 · 로컬 계산</span></article>
+      <article class="card stage reveal"><span class="n">3</span><span class="ic"><svg><use href="#i-eye"/></svg></span>
+        <h3>AI의 눈</h3><p>후보 구간의 화면을 Gemini가 보고 골·슈팅·세이브인지, 얼마나 확실한지 판단해요.</p><span class="cost">경기당 약 $0.1</span></article>
     </div>
     <div class="card result reveal">
-      <h3>예시 — 9월 6일 경기의 10분 구간</h3>
-      <div class="seg" role="img" aria-label="후보 19개 중 8개 자동 채택, 2개 확인 필요, 9개 제외">
+      <h3>실측 예시<small>9월 6일 경기 · 10분 구간</small></h3>
+      <div class="seg" role="img" aria-label="소리 후보 19개 중 8개 자동 채택, 2개 확인 필요, 9개 제외">
         <span class="a" style="flex:8">채택 8</span><span class="m" style="flex:2">2</span><span class="x" style="flex:9">제외 9</span>
       </div>
       <ul>
@@ -420,79 +477,80 @@ footer p{margin:0 0 6px}
   </div>
 </section>
 
-<!-- ── 샘플 ─────────────────────────────────── -->
+<!-- 샘플 -->
 <section class="section" id="samples">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">4 · 샘플</p>
+      <p class="kicker"><b>05</b>샘플</p>
       <h2>실제로 만들어진<br>결과물이에요</h2>
-      <p>HLEditor가 자동으로 만들어 YouTube에 올린 하이라이트예요. 재생 버튼을 누르면 YouTube가 연결돼요.</p>
+      <p>HLEditor가 자동으로 만들어 YouTube에 올린 하이라이트예요. 재생 버튼을 누르면 그때 YouTube가 연결돼요.</p>
     </div>
 
+    <p class="hint">옆으로 넘겨 보세요 →</p>
     <div class="vgrid reveal">
-      <article class="card vcard"><div class="frame"><button class="yt" data-id="90vmuNG2Yrc" data-title="2026-08-02 1경기 하이라이트" aria-label="2026-08-02 1경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/90vmuNG2Yrc/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-08-02 · 1경기</b><span>하이라이트 자동 생성</span></div></article>
-      <article class="card vcard"><div class="frame"><button class="yt" data-id="PTMCycBl508" data-title="2026-09-06 1경기 하이라이트" aria-label="2026-09-06 1경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/PTMCycBl508/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-09-06 · 1경기</b><span>하이라이트 자동 생성</span></div></article>
-      <article class="card vcard"><div class="frame"><button class="yt" data-id="obF41FLgBnk" data-title="2026-09-06 2경기 하이라이트" aria-label="2026-09-06 2경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/obF41FLgBnk/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-09-06 · 2경기</b><span>하이라이트 자동 생성</span></div></article>
+      <article class="card vcard"><div class="frame"><button class="yt" data-id="90vmuNG2Yrc" data-title="2026-08-02 1경기 하이라이트" aria-label="2026-08-02 1경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/90vmuNG2Yrc/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-08-02 · 1경기</b><span>자동 생성 하이라이트</span></div></article>
+      <article class="card vcard"><div class="frame"><button class="yt" data-id="PTMCycBl508" data-title="2026-09-06 1경기 하이라이트" aria-label="2026-09-06 1경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/PTMCycBl508/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-09-06 · 1경기</b><span>자동 생성 하이라이트</span></div></article>
+      <article class="card vcard"><div class="frame"><button class="yt" data-id="obF41FLgBnk" data-title="2026-09-06 2경기 하이라이트" aria-label="2026-09-06 2경기 하이라이트 재생"><img src="https://i.ytimg.com/vi/obF41FLgBnk/hqdefault.jpg" alt="" loading="lazy"><span class="play"></span></button></div><div class="vmeta"><b>2026-09-06 · 2경기</b><span>자동 생성 하이라이트</span></div></article>
     </div>
 
     <div class="pair">
       <div class="reveal">
-        <h3 class="sub">2D 버드뷰 <span class="tag">실험</span></h3>
+        <h3 class="sub">2D 버드뷰 <span class="tag h">실험</span></h3>
         <article class="card v2d">
           <video src="assets/dotplay_demo.mp4" poster="assets/dotplay_poster.jpg" controls playsinline preload="none" muted loop></video>
-          <div class="vmeta"><b>선수 위치를 위에서 본 그림으로</b><span>축구 게임처럼 점으로 바꿔 보는 기능이에요. 아직 완성도가 낮아서 기본은 꺼 둬요.</span></div>
+          <div class="vmeta"><b>선수 위치를 위에서 본 그림으로</b><span>축구 게임처럼 점으로 바꿔 보는 기능이에요. 아직 완성도가 낮아 기본은 꺼 둬요.</span></div>
         </article>
       </div>
       <div class="reveal">
         <h3 class="sub">자동으로 붙는 영상 설명 <span class="tag">예시</span></h3>
 <pre class="desc" aria-label="자동 생성되는 YouTube 영상 설명 예시">축구 하이라이트 — 5경기
 
-0:18 오른발 중거리 슛이 골망을 흔듦  (원본 5:42)
-1:04 코너킥 이후 헤더 득점  (원본 14:09)
-2:31 역습에서 1대1 마무리  (원본 21:37)
+<span class="t">0:18</span> 오른발 중거리 슛이 골망을 흔듦  <span class="c">(원본 5:42)</span>
+<span class="t">1:04</span> 코너킥 이후 헤더 득점  <span class="c">(원본 14:09)</span>
+<span class="t">2:31</span> 역습에서 1대1 마무리  <span class="c">(원본 21:37)</span>
 
----
-이 영상은 HLEditor로 자동 생성된 하이라이트입니다.</pre>
-        <p style="color:var(--muted);font-size:.9rem;margin:10px 0 0">득점 장면은 챕터 시간으로 붙어서, 보다가 바로 이동할 수 있어요. (내용은 예시)</p>
+<span class="c">---
+이 영상은 HLEditor로 자동 생성된 하이라이트입니다.</span></pre>
+        <p class="small">득점 장면이 챕터로 붙어서, 보다가 바로 이동할 수 있어요. (내용은 예시)</p>
       </div>
     </div>
 
     <h3 class="sub reveal">알림이 오면, 붙여넣기만</h3>
     <div class="phones reveal">
       <div class="phone"><div class="screen">
-        <div class="clock">9:41</div><div class="date">일요일, 8월 2일</div>
+        <div class="clock">9:41</div><div class="date">8월 2일 일요일</div>
         <div class="notif"><div class="nh"><span>ntfy</span><span>지금</span></div>
           <b>하이라이트 1경기 완료 (영상 2개 처리)</b>
           <p>2026년 08월 02일 경기 하이라이트 영상입니다.<br><br>· 5경기<br>https://youtu.be/AbCdEfGhIjK</p></div>
       </div></div>
-      <div>
+      <div class="paste">
         <p class="arrow">알림을 탭하면 글 전체가 복사돼요 ↓</p>
-        <div class="card band" style="margin-top:10px">
+        <div class="card band">
           <div class="bh">새 글 쓰기 <span>BAND</span></div>
           <div class="bb">2026년 08월 02일 경기 하이라이트 영상입니다.<br><br>· 5경기<br><u>https://youtu.be/AbCdEfGhIjK</u></div>
-          <div class="bf">붙여넣고 게시만 누르면 끝 (예시 화면)</div>
+          <div class="bf">붙여넣고 게시만 누르면 끝<i>게시</i></div>
         </div>
+        <p class="small" style="text-align:center">화면은 예시예요.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── 비용·시간 ───────────────────────────── -->
-<section class="section alt" id="numbers">
+<!-- 비용·시간 -->
+<section class="section" id="numbers">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">5 · 숫자로 보면</p>
+      <p class="kicker"><b>06</b>숫자로 보면</p>
       <h2>얼마나 들고,<br>얼마나 걸릴까요</h2>
     </div>
     <div class="tiles reveal">
-      <div class="card tile"><b>3번</b><span>사람이 직접<br>하는 일</span></div>
-      <div class="card tile"><b>1통</b><span>경기를 다 올려도<br>오는 알림</span></div>
-      <div class="card tile"><b>≈ $0.1</b><span>경기 한 편당<br>AI 비용</span></div>
-      <div class="card tile"><b>0대</b><span>직접 운영하는<br>서버</span></div>
+      <div class="tile"><b>$0.1</b><span>경기당<br>AI 비용</span></div>
+      <div class="tile"><b>20분</b><span>마지막 업로드 후<br>알림 대기</span></div>
+      <div class="tile"><b>7일</b><span>원본<br>자동 정리</span></div>
     </div>
     <div class="card tbl reveal">
       <table>
-        <caption>경기 1개(원본 약 2~2.6GB) 처리 시간 — PC에서 잰 값이에요</caption>
+        <caption>경기 1개(원본 약 2~2.6GB) 처리 시간 · PC에서 잰 값</caption>
         <thead><tr><th>단계</th><th>걸린 시간</th></tr></thead>
         <tbody>
           <tr><td>폰에서 Drive로 업로드 (5G)</td><td>4~10분</td></tr>
@@ -503,36 +561,43 @@ footer p{margin:0 0 6px}
         </tbody>
       </table>
     </div>
-    <p class="sec-head" style="margin:22px 0 10px;color:var(--muted)">쓰는 서비스는 모두 무료 구간 안이에요</p>
-    <ul class="chips reveal"><li>Google Drive</li><li>Apps Script</li><li>Kaggle</li><li>YouTube</li><li>ntfy</li><li>Gemini (유료 호출)</li></ul>
+    <ul class="chips reveal" aria-label="사용하는 서비스"><li>Google Drive</li><li>Apps Script</li><li>Kaggle</li><li>YouTube</li><li>ntfy</li><li class="paid">Gemini · 유료 호출</li></ul>
   </div>
 </section>
 
-<!-- ── 한계 ─────────────────────────────────── -->
+<!-- 한계 -->
 <section class="section" id="limits">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">솔직한 이야기</p>
+      <p class="kicker"><b>07</b>솔직한 이야기</p>
       <h2>아직 부족한 점도<br>있어요</h2>
     </div>
-    <ul class="lim" style="margin:0;padding:0">
-      <li class="card reveal"><b>조용한 득점은 놓칠 수 있어요</b><span>소리가 1차 신호라서, 환호가 작은 장면은 후보에 못 오를 수 있어요.</span></li>
-      <li class="card reveal"><b>알림이 두 번 올 때도 있어요</b><span>업로드가 20분 넘게 끊기면 “다 올렸다”고 보고 먼저 알려요.</span></li>
-      <li class="card reveal"><b>실패를 숨기지 않아요</b><span>한 번은 AI 판별이 전부 실패했는데도 “하이라이트 없음”으로 끝났어요. 지금은 이유를 알림에 적고 원본을 <code>04_failed</code>로 옮겨 둬요.</span></li>
-      <li class="card reveal"><b>2D 변환은 실험 단계예요</b><span>선수 위치 추적 정확도가 아직 낮아서 기본으로 꺼 두었어요.</span></li>
+    <ul class="lim">
+      <li class="card reveal"><span class="n">01</span><div><b>조용한 득점은 놓칠 수 있어요</b><span>소리가 1차 신호라서, 환호가 작은 장면은 후보에 못 오를 수 있어요.</span></div></li>
+      <li class="card reveal"><span class="n">02</span><div><b>알림이 두 번 올 때도 있어요</b><span>업로드가 20분 넘게 끊기면 “다 올렸다”고 보고 먼저 알려요.</span></div></li>
+      <li class="card reveal"><span class="n">03</span><div><b>실패를 숨기지 않아요</b><span>한 번은 AI 판별이 전부 실패했는데도 “하이라이트 없음”으로 끝났어요. 지금은 이유를 알림에 적고 원본을 04_failed로 옮겨 둬요.</span></div></li>
+      <li class="card reveal"><span class="n">04</span><div><b>2D 변환은 실험 단계예요</b><span>선수 위치 추적 정확도가 아직 낮아서 기본으로 꺼 두었어요.</span></div></li>
     </ul>
+  </div>
+</section>
+
+<!-- 마무리 -->
+<section class="closing">
+  <div class="wrap reveal">
+    <h2>올리면,<br><span class="hl">끝.</span></h2>
+    <p>촬영하고, 올리고, 알림이 오면 붙여넣기. 나머지는 HLEditor가 해요.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/sampark0626/HLEditor" rel="noopener">GitHub에서 보기</a>
+      <a class="btn ghost" href="https://github.com/sampark0626/HLEditor/blob/main/PRIVACY.md" rel="noopener">개인정보처리방침</a>
+    </div>
   </div>
 </section>
 </main>
 
 <footer>
   <div class="wrap">
-    <div class="cta">
-      <a class="btn primary" href="https://github.com/sampark0626/HLEditor" rel="noopener">GitHub에서 보기</a>
-      <a class="btn ghost" href="https://github.com/sampark0626/HLEditor/blob/main/PRIVACY.md" rel="noopener">개인정보처리방침</a>
-    </div>
     <p>HLEditor는 동호회 운영자가 직접 쓰려고 만든 비상업 개인 프로젝트예요.</p>
-    <p>이 페이지는 분석·추적 도구를 쓰지 않아요. 영상 재생을 누르면 그때 YouTube에 연결돼요.</p>
+    <p>이 페이지는 분석·추적 도구를 쓰지 않아요. 글꼴은 jsDelivr에서, 영상은 재생을 누를 때 YouTube에서 불러와요.</p>
   </div>
 </footer>
 
@@ -544,7 +609,7 @@ const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 try{
   const rv=[...document.querySelectorAll('.reveal')];
   if('IntersectionObserver' in window && !reduce){
-    const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.1});
+    const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.08,rootMargin:'0px 0px -6% 0px'});
     rv.forEach(n=>io.observe(n));
   }else rv.forEach(n=>n.classList.add('in'));
 }catch(e){document.querySelectorAll('.reveal').forEach(n=>n.classList.add('in'))}
@@ -561,13 +626,13 @@ document.querySelectorAll('.yt').forEach(b=>b.addEventListener('click',()=>{
 try{
   const lanes=[...document.querySelectorAll('.lane[data-seq]')];
   let k=0;const step=()=>{lanes.forEach((l,i)=>l.classList.toggle('on',i===k));k=(k+1)%lanes.length};
-  step();if(!reduce)setInterval(step,1600);
+  step();if(!reduce)setInterval(step,1700);
 }catch(e){}
 
-/* 촬영 장면: 공을 따라가는 카메라 */
+/* 촬영 장면: 야간 경기장, 공을 따라가는 카메라 */
 (function(){
   const svg=document.getElementById('scene');if(!svg)return;
-  const fig=document.getElementById('sceneFig'),wave=document.getElementById('wave');
+  const fig=document.getElementById('sceneFig'),wave=document.getElementById('wave'),tc=document.getElementById('tc');
   const NS='http://www.w3.org/2000/svg';
   const mk=(n,a,p)=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);(p||svg).appendChild(e);return e};
   const lerp=(a,b,t)=>a+(b-a)*t, clamp=(v,a,b)=>Math.min(b,Math.max(a,v)), f1=n=>n.toFixed(1);
@@ -577,18 +642,28 @@ try{
   const path=(a,c)=>'M'+a.map(p=>proj(p[0],p[1]).map(f1).join(' ')).join('L')+(c?'Z':'');
   const ring=(cu,cv,ru,rv)=>{const a=[];for(let i=0;i<48;i++){const t=i/48*Math.PI*2;a.push([cu+Math.cos(t)*ru,cv+Math.sin(t)*rv])}return a};
 
+  let stars='',lights='';
+  for(let i=0;i<28;i++)stars+='<circle cx="'+((i*137.5)%360).toFixed(1)+'" cy="'+(5+(i*53)%72)+'" r="'+(i%3?.55:.9)+'"/>';
+  for(let i=0;i<38;i++)lights+='<circle cx="'+(8+i*9.3).toFixed(1)+'" cy="'+(100+(i*7)%5)+'" r=".7"/>';
+  const tower=x=>'<path d="M'+x+' 118V30" stroke="#26303b" stroke-width="2"/><path d="M'+(x-6)+' 118L'+x+' 60L'+(x+6)+' 118" fill="none" stroke="#1d252e" stroke-width="1"/>'+
+    '<circle cx="'+x+'" cy="28" r="34" fill="url(#fg)"/><rect x="'+(x-13)+'" y="23" width="26" height="9" rx="2" fill="#fff8d8"/>';
   svg.innerHTML=
-   '<defs><linearGradient id="sk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--sky-a)"/><stop offset="1" style="stop-color:var(--sky-b)"/></linearGradient></defs>'+
-   '<rect width="360" height="330" fill="var(--ground)"/><rect width="360" height="120" fill="url(#sk)"/>'+
-   '<path d="M0 108Q70 86 140 100T290 94T360 102V120H0Z" fill="var(--hill)"/>'+
-   '<rect x="20" y="82" width="66" height="32" rx="2" fill="var(--bld)"/><g fill="var(--sky-b)" opacity=".8"><rect x="28" y="90" width="9" height="7"/><rect x="44" y="90" width="9" height="7"/><rect x="60" y="90" width="9" height="7"/></g>'+
-   '<g fill="var(--tree)"><circle cx="104" cy="104" r="10"/><circle cx="142" cy="102" r="12"/><circle cx="186" cy="104" r="10"/><circle cx="232" cy="101" r="12"/><circle cx="318" cy="103" r="11"/></g>'+
-   '<g fill="var(--tree-2)"><circle cx="120" cy="106" r="9"/><circle cx="162" cy="105" r="9"/><circle cx="208" cy="105" r="10"/><circle cx="296" cy="105" r="9"/><circle cx="342" cy="106" r="9"/></g>'+
-   '<path d="M250 116H360" stroke="var(--chalk)" stroke-width="1" opacity=".5"/>';
+   '<defs>'+
+   '<linearGradient id="sk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#03060b"/><stop offset="1" stop-color="#16263f"/></linearGradient>'+
+   '<radialGradient id="fg"><stop offset="0" stop-color="#fffbe0" stop-opacity=".95"/><stop offset=".22" stop-color="#fff2bf" stop-opacity=".35"/><stop offset="1" stop-color="#fff2bf" stop-opacity="0"/></radialGradient>'+
+   '<linearGradient id="bm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff6cf" stop-opacity=".16"/><stop offset="1" stop-color="#fff6cf" stop-opacity="0"/></linearGradient>'+
+   '<radialGradient id="vg" cx=".5" cy=".5" r=".72"><stop offset=".5" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".6"/></radialGradient>'+
+   '<radialGradient id="pg" cx=".5" cy=".55" r=".6"><stop offset="0" stop-color="#fff" stop-opacity=".08"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'+
+   '</defs>'+
+   '<rect width="360" height="330" fill="#08170e"/><rect width="360" height="122" fill="url(#sk)"/>'+
+   '<g fill="#fff" opacity=".5">'+stars+'</g>'+
+   '<path d="M0 96L40 90L120 94L180 88L250 93L320 89L360 95V122H0Z" fill="#0a1320"/>'+
+   '<g fill="#ffd98a" opacity=".45">'+lights+'</g>'+tower(36)+tower(324);
 
   const pitch=mk('g');
-  for(let i=0;i<10;i++)mk('polygon',{points:pts([[i/10,0],[(i+1)/10,0],[(i+1)/10,1],[i/10,1]]),fill:i%2?'var(--grass-b)':'var(--grass-a)'},pitch);
-  const L={fill:'none',stroke:'var(--chalk)','stroke-width':1.3,'stroke-linejoin':'round'};
+  for(let i=0;i<10;i++)mk('polygon',{points:pts([[i/10,0],[(i+1)/10,0],[(i+1)/10,1],[i/10,1]]),fill:i%2?'#1a5f33':'#1f6c3a'},pitch);
+  mk('polygon',{points:pts([[0,0],[1,0],[1,1],[0,1]]),fill:'url(#pg)'},pitch);
+  const L={fill:'none',stroke:'rgba(255,255,255,.88)','stroke-width':1.2,'stroke-linejoin':'round'};
   const line=(el,a)=>mk(el,Object.assign({},L,a),pitch);
   line('polygon',{points:pts([[0,0],[1,0],[1,1],[0,1]])});
   line('path',{d:path([[.5,0],[.5,1]])});
@@ -597,28 +672,32 @@ try{
   line('path',{d:path([[1,.204],[.843,.204],[.843,.796],[1,.796]])});
   line('path',{d:path([[0,.368],[.052,.368],[.052,.632],[0,.632]])});
   line('path',{d:path([[1,.368],[.948,.368],[.948,.632],[1,.632]])});
-  [[0,-1],[1,1]].forEach(([u,s])=>line('path',{d:path([[u,.44],[u+s*.045,.44],[u+s*.045,.56],[u,.56]]),fill:'rgba(255,255,255,.18)'}));
+  [[0,-1],[1,1]].forEach(([u,s])=>line('path',{d:path([[u,.44],[u+s*.045,.44],[u+s*.045,.56],[u,.56]]),fill:'rgba(255,255,255,.14)'}));
+  const beams=mk('g');
+  beams.innerHTML='<path d="M30 32L-30 230L170 230Z" fill="url(#bm)"/><path d="M330 32L390 230L190 230Z" fill="url(#bm)"/>';
 
-  const cone=mk('polygon',{points:'',fill:'rgba(245,158,11,.22)',stroke:'var(--hl-line)','stroke-width':1.4,'stroke-dasharray':'4 3','stroke-linejoin':'round'});
+  const cone=mk('polygon',{points:'',fill:'rgba(201,245,90,.13)',stroke:'#c9f55a','stroke-width':1.2,'stroke-dasharray':'4 3','stroke-linejoin':'round','stroke-opacity':.9});
   const pl=mk('g');
   const players=[];
   const A=[[.16,.5],[.3,.28],[.32,.74],[.52,.4],[.6,.66]],B=[[.84,.5],[.7,.3],[.68,.72],[.48,.6],[.4,.3]];
   const addP=(b,color,i)=>{const g=mk('g',{},pl);
-    g.innerHTML='<ellipse rx="4.4" ry="1.6" fill="rgba(0,0,0,.22)"/><rect x="-2.9" y="-9.5" width="5.8" height="8.5" rx="2.2" fill="'+color+'"/><circle cy="-12" r="2.5" fill="#ecd9c8"/>';
+    g.innerHTML='<ellipse rx="4.6" ry="1.6" fill="rgba(0,0,0,.4)"/><rect x="-2.9" y="-9.5" width="5.8" height="8.5" rx="2.2" fill="'+color+'"/><circle cy="-12" r="2.5" fill="#e7d3c0"/>';
     players.push({g,b,k:.14+((i*37)%30)/100,ph:i*1.7,f:.7+((i*13)%10)/20,a:.02+((i*7)%5)/300,y:0})};
-  A.forEach((b,i)=>addP(b,'var(--team-a)',i));B.forEach((b,i)=>addP(b,'var(--team-b)',i+5));
+  A.forEach((b,i)=>addP(b,'#f1f3ef',i));B.forEach((b,i)=>addP(b,'#ff6b57',i+5));
 
   const ballG=mk('g');
-  ballG.innerHTML='<ellipse rx="3.4" ry="1.3" fill="rgba(0,0,0,.28)"/><circle class="bl" cy="-3" r="2.7" fill="#fff" stroke="#222" stroke-width=".9"/>';
+  ballG.innerHTML='<ellipse rx="3.4" ry="1.3" fill="rgba(0,0,0,.4)"/><circle class="bl" cy="-3" r="2.7" fill="#fff" stroke="#111" stroke-width=".7"/>';
   const ballC=ballG.querySelector('.bl');
+  mk('rect',{width:360,height:330,fill:'url(#vg)'});
 
   const cam=mk('g',{transform:'translate(180 322) scale(1.25) translate(-180 -306)'});
   cam.innerHTML=
-   '<g stroke="var(--tripod)" stroke-width="3.2" stroke-linecap="round"><path d="M180 252 156 302M180 252 204 302M180 252v54"/></g>'+
-   '<rect x="177" y="240" width="6" height="14" rx="2" fill="var(--tripod)"/><ellipse cx="180" cy="240" rx="15" ry="4" fill="var(--cam-2)"/>'+
-   '<g class="head" transform="translate(180 238)"><rect x="-17" y="-20" width="34" height="20" rx="5" fill="var(--cam)"/>'+
-   '<rect class="barrel" x="-7" y="-28" width="14" height="9" rx="3" fill="var(--cam-2)"/><circle class="glass" cy="-24" r="2.8" fill="#4d86d6"/>'+
-   '<circle class="led" cx="10" cy="-12" r="1.7" fill="#ef4444"/></g>';
+   '<g stroke="#3a424b" stroke-width="3.2" stroke-linecap="round"><path d="M180 252 156 302M180 252 204 302M180 252v54"/></g>'+
+   '<rect x="177" y="240" width="6" height="14" rx="2" fill="#3a424b"/><ellipse cx="180" cy="240" rx="15" ry="4" fill="#1d2126" stroke="rgba(255,255,255,.15)" stroke-width=".6"/>'+
+   '<g class="head" transform="translate(180 238)"><rect x="-17" y="-20" width="34" height="20" rx="5" fill="#15181c" stroke="rgba(255,255,255,.22)" stroke-width=".8"/>'+
+   '<rect x="-9" y="-3.6" width="18" height="1.4" rx=".7" fill="#c9f55a"/>'+
+   '<rect class="barrel" x="-7" y="-28" width="14" height="9" rx="3" fill="#272c32" stroke="rgba(255,255,255,.18)" stroke-width=".6"/><circle class="glass" cy="-24" r="2.8" fill="#8cc0ff"/>'+
+   '<circle class="led" cx="11" cy="-14" r="1.6" fill="#ff4d4d"/></g>';
   const head=cam.querySelector('.head'),barrel=cam.querySelector('.barrel'),glass=cam.querySelector('.glass');
 
   const W=[[.5,.5],[.36,.36],[.25,.55],[.12,.48],[.06,.5],[.28,.66],[.5,.42],[.68,.6],[.84,.5],[.94,.5],[.7,.38],[.5,.5]];
@@ -626,8 +705,9 @@ try{
   const ballAt=t=>{const s=(t/SEG)%N,i=Math.floor(s),f=s-i,e=f*f*(3-2*f),a=W[i],b=W[i+1];
     return{u:lerp(a[0],b[0],e),v:lerp(a[1],b[1],e),lift:Math.sin(Math.PI*f)*((i===3||i===8)?11:3)}};
 
-  const bars=[];for(let i=0;i<40;i++)bars.push(wave.appendChild(document.createElement('i')));
-  let aim=180,hotL=0,hotOn=false,frame=0;
+  const bars=[];for(let i=0;i<44;i++)bars.push(wave.appendChild(document.createElement('i')));
+  const pad=n=>String(n).padStart(2,'0');
+  let aim=180,hotL=0,hotOn=false,frame=0,lastS=-1;
   function render(t,dt){
     const b=ballAt(t),[bx,by]=proj(b.u,b.v),s=.8+.95*b.v;
     ballG.setAttribute('transform','translate('+f1(bx)+' '+f1(by)+') scale('+s.toFixed(2)+')');
@@ -646,6 +726,8 @@ try{
     cone.setAttribute('points',f1(ax)+',206 '+f1(aim-60)+',118 '+f1(aim+60)+',118');
     const target=(b.u<.15||b.u>.85)?1:0;hotL+=(target-hotL)*(1-Math.exp(-dt*6));
     const on=hotL>.5;if(on!==hotOn){hotOn=on;fig.dataset.hot=on?'1':'0'}
+    const sec=Math.floor(t)+2537;
+    if(sec!==lastS){lastS=sec;tc.textContent=pad(Math.floor(sec/3600))+':'+pad(Math.floor(sec/60)%60)+':'+pad(sec%60)}
     bars.forEach((el,i)=>{
       const base=.16+.08*Math.sin(t*2.6+i*.8)+.06*Math.sin(t*6.1+i*2.3);
       const spike=hotL*(.5+.35*Math.sin(t*13+i*1.1))*(.55+.45*Math.sin(i*.33+.9));
