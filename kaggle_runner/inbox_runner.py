@@ -71,6 +71,10 @@ QUALITY_MIN_VIDEO_BPS = 4_000_000
 # "하이라이트 없음"으로 보인다 — 오류로 끝난 후보의 사유가 이 접두어로 시작한다.
 JUDGE_ERROR_PREFIXES = ("api_error:", "clip_error:", "parse_error:", "no_video_clip")
 JUDGE_FAIL_RATIO = 0.5            # 판별 오류가 후보의 이 비율 이상이면 "하이라이트 없음"이 아니라 처리 실패로 본다
+# 결제·크레딧 오류는 한 후보라도 나면 경기 전체를 실패로 보낸다 — 남은 후보는 판별하지 않았으므로
+# 일부만으로 만들면 장면이 빠진다. 충전한 뒤 다시 처리하면 된다.
+GEMINI_CREDIT_HELP = ("Gemini API 선불 크레딧이 바닥나 AI 판별을 하지 못했습니다(402). "
+                      "Google AI Studio의 결제(Billing) 화면에서 충전해 주세요.")
 
 
 def log(msg: str) -> None:
@@ -623,6 +627,11 @@ class InboxRunner:
         self._save_results(match_date, label, video, group, cands, info)
 
         errors = judge_errors(cands) if info["vision_used"] else []
+        billing = [e for e in errors if e.startswith(sh.BILLING_ERROR_PREFIX)]
+        if billing:
+            first = next((e for e in billing if "판별하지 않음" not in e), billing[0])
+            self.log(f"[{label}] AI 판별 결제·크레딧 오류 {len(billing)}/{len(cands)}개 — {first}")
+            raise RuntimeError(GEMINI_CREDIT_HELP)
         if errors:
             sample = Counter(errors).most_common(1)[0][0]
             self.log(f"[{label}] AI 판별 오류 {len(errors)}/{len(cands)}개 — 가장 많은 사유: {sample}")

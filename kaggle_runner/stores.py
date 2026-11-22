@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 FOLDERS = {
+    "upload": "00_upload",       # 업로드 대기 장소. 만들어만 두고 러너는 안의 파일을 건드리지 않는다
     "inbox": "01_inbox",
     "inbox_2d": "01_inbox_2d",
     "processing": "02_processing",

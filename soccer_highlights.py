@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -68,6 +69,9 @@ VISION_MODEL   = config.get_env("GEMINI_MODEL", "gemini-2.5-flash")   # 비용/�
 VISION_WORKERS = 6      # 비전 호출 동시 병렬 수 (Gemini rate limit 고려해 4~8 권장)
 VISION_RETRIES = 4      # 503/429 등 일시적 오류 시 후보당 최대 재시도 횟수
 RETRY_BASE_SEC = 2.0    # 재시도 지수 백오프 기준 (2,4,8,... 초 + 지터)
+# 결제·크레딧 문제(선불 크레딧 소진 등)로 판별하지 못한 후보의 사유 접두어. "api_error:"로 시작하므로
+# 기존 오류 집계(inbox_runner.judge_errors)에도 그대로 잡힌다.
+BILLING_ERROR_PREFIX = "api_error: billing:"
 CONF_AUTO      = 0.70   # 이 신뢰도 이상이면 자동 채택
 CONF_MAYBE     = 0.40   # 이 값 이상 ~ AUTO 미만이면 '확인 필요'로 분류
 
@@ -389,8 +393,24 @@ VISION_PROMPT = """당신은 아마추어(동호회) 축구 경기 유튜브 하
 {"highlight": true/false, "type": "goal|shot|save|attack|other", "confidence": 0.0~1.0, "reason": "사실 기반의 유튜브 캡션 한 줄"}"""
 
 
+def is_billing_error(exc):
+    """결제·크레딧 문제라 기다려도 풀리지 않는 오류인지 판단.
+
+    실측(2026-11-22): 선불 크레딧이 바닥나면 Gemini가
+    "402 RESOURCE_EXHAUSTED. {... 'Your prepayment credits are depleted ...'}"를 돌려준다.
+    RESOURCE_EXHAUSTED가 들어 있어 429(속도 제한)처럼 보이지만 재시도해도 소용없다.
+    """
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code == 402:
+        return True
+    msg = str(exc).upper()
+    return msg.startswith("402 ") or "PREPAYMENT" in msg or "CREDITS ARE DEPLETED" in msg
+
+
 def _is_transient(exc):
     """503/429/5xx 등 잠시 후 재시도하면 풀릴 수 있는 오류인지 판단."""
+    if is_billing_error(exc):
+        return False
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
     if code in (429, 500, 502, 503, 504):
         return True
@@ -500,6 +520,8 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
     # 완료 순서와 무관하게 원본 인덱스(idx)를 키로 결과를 모은다
     results = {}
     usage_total = {"in": 0, "out": 0, "calls": 0}
+    # 한 후보라도 결제·크레딧 오류가 나면 남은 후보는 부르지 않는다 — 어차피 모두 같은 오류로 실패한다.
+    billing_stop = threading.Event()
 
     def _process(idx, cand):
         # 이미 성공적으로 비전 판별이 완료된 후보라면 비전 호출을 건너뛴다.
@@ -508,6 +530,10 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
                        for prefix in ("api_error:", "clip_error:", "parse_error:"))
         if cand.get("confidence") is not None and cand.get("type") is not None and not is_error:
             return idx, cand, None
+
+        if billing_stop.is_set():
+            return idx, {"highlight": False, "type": "other", "confidence": 0.0,
+                         "reason": f"{BILLING_ERROR_PREFIX} 앞선 후보에서 결제·크레딧 오류가 나 판별하지 않음"}, None
 
         # 비디오 클립 및 썸네일 추출도 후보 단위로 격리
         try:
@@ -524,8 +550,13 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
             return idx, res, usage
         except Exception as e:
             # 한 후보가 재시도까지 실패해도 배치 전체를 죽이지 않고 격리한다.
+            if is_billing_error(e):
+                billing_stop.set()
+                reason = f"{BILLING_ERROR_PREFIX} {str(e)[:80]}"
+            else:
+                reason = f"api_error: {str(e)[:80]}"
             return idx, {"highlight": False, "type": "other", "confidence": 0.0,
-                         "reason": f"api_error: {str(e)[:80]}"}, None
+                         "reason": reason}, None
 
     cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:

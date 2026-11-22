@@ -1,5 +1,7 @@
 """soccer_highlights.py의 순수 로직(오디오 분석·구간 선택) 유닛 테스트."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -134,3 +136,73 @@ class TestCoerceClassification:
         cand.update(sh._coerce_classification(["goal", "shot"]))
         assert cand["peak"] == 10.0
         assert cand["type"] == "other"
+
+
+# ─── 결제·크레딧 오류(402) ────────────────────────────────────────────────────
+# 실제 사고(2026-11-22): 선불 크레딧이 바닥나 Gemini가 402 RESOURCE_EXHAUSTED를 돌려줬다.
+# RESOURCE_EXHAUSTED가 들어 있어 일시적 오류로 보고 후보마다 4번씩 재시도했다.
+CREDIT_MSG = ("402 RESOURCE_EXHAUSTED. {'error': {'code': 402, 'message': "
+              "'Your prepayment credits are depleted. Please go to AI Studio to manage your billing.'}}")
+
+
+class _ApiError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+
+
+class TestBillingErrors:
+    @pytest.mark.parametrize("exc", [
+        _ApiError(402, CREDIT_MSG),
+        Exception(CREDIT_MSG),                        # code 속성이 없어도 메시지로 알아본다
+        Exception("Your prepayment credits are depleted"),
+    ])
+    def test_credit_errors_are_billing_and_not_retried(self, exc):
+        assert sh.is_billing_error(exc)
+        assert not sh._is_transient(exc)
+
+    @pytest.mark.parametrize("exc", [
+        _ApiError(429, "429 RESOURCE_EXHAUSTED. Quota exceeded for requests per minute"),
+        _ApiError(503, "503 UNAVAILABLE. The model is overloaded"),
+    ])
+    def test_rate_limits_stay_transient(self, exc):
+        assert not sh.is_billing_error(exc)
+        assert sh._is_transient(exc)
+
+    def test_classify_with_gemini_does_not_retry_credit_errors(self, tmp_path, monkeypatch):
+        calls = []
+
+        class Files:
+            def upload(self, file):
+                return SimpleNamespace(name="f", state=SimpleNamespace(name="ACTIVE"))
+
+            def delete(self, name):
+                pass
+
+        class Models:
+            def generate_content(self, **kw):
+                calls.append(1)
+                raise _ApiError(402, CREDIT_MSG)
+
+        monkeypatch.setattr(sh.time, "sleep", lambda s: pytest.fail("재시도 대기를 하면 안 된다"))
+        client = SimpleNamespace(files=Files(), models=Models())
+        with pytest.raises(_ApiError):
+            sh.classify_with_gemini(tmp_path / "c.mp4", client)
+        assert calls == [1]
+
+    def test_remaining_candidates_are_skipped_after_a_credit_error(self, tmp_path, monkeypatch):
+        calls = []
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x")
+        monkeypatch.setattr(sh, "extract_video_clip_and_thumbnail", lambda *a, **k: clip)
+
+        def fake_classify(path, client):
+            calls.append(1)
+            raise _ApiError(402, CREDIT_MSG)
+
+        monkeypatch.setattr(sh, "classify_with_gemini", fake_classify)
+        cands = [{"peak": float(p)} for p in (10, 20, 30, 40, 50)]
+        sh.classify_all_parallel(cands, "v.mp4", tmp_path, None, sh.CONF_AUTO, workers=1)
+        assert calls == [1]
+        assert all(c["reason"].startswith(sh.BILLING_ERROR_PREFIX) for c in cands)
+        assert all(c["highlight"] is False for c in cands)

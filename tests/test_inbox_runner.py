@@ -658,3 +658,26 @@ def test_main_without_secrets_dataset_exits_2(tmp_path, monkeypatch):
     monkeypatch.setattr(ir, "ensure_runtime_deps", lambda: None)
     monkeypatch.setattr(ir, "find_secrets_file", lambda root=None: None)
     assert ir.main(["--workdir", str(tmp_path)]) == 2
+
+
+def test_credit_error_fails_the_game_with_a_top_up_hint_even_if_only_one(h):
+    """선불 크레딧 소진(402)은 후보 하나만이어도 실패로 보낸다 — 남은 후보는 판별하지 않았기 때문이다."""
+    billing = ir.sh.BILLING_ERROR_PREFIX + " 402 RESOURCE_EXHAUSTED. Your prepayment credits are depleted"
+    h.verdict = lambda c: (
+        {"highlight": False, "type": "other", "confidence": 0.0, "reason": billing}
+        if c["peak"] == 100.0 else {"highlight": True, "confidence": 0.9, "type": "goal", "reason": "골"})
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.files("failed") == ["g.mp4"] and h.files("done") == []
+    msg = h.notes[0]["message"]
+    assert "처리 실패 — g.mp4" in msg and ir.GEMINI_CREDIT_HELP in msg and "01_inbox로 옮기면" in msg
+    assert h.published == [] and h.store.read_json("day_2026-09-27.json") is None
+
+
+def test_upload_folder_is_created_and_left_alone(h):
+    """00_upload는 만들어 두기만 한다 — 아직 올라가는 중인 영상을 처리하면 안 된다."""
+    assert (h.root / "00_upload").is_dir()
+    h.add("uploading.mp4", 1500, start_min=0, folder="upload")
+    h.run()
+    assert h.files("upload") == ["uploading.mp4"]
+    assert h.files("done") == [] and h.files("failed") == [] and h.published == []
