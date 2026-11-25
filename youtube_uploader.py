@@ -296,6 +296,10 @@ def make_title(base: str, video_name: str, match_date: str, index: int | None = 
 
 
 # ─── 설명 생성 ────────────────────────────────────────────────────────────────
+# 설명에 '슈팅'으로 올리는 판정 유형. 골은 따로 구분하지 않는다(generate_description 참고).
+SHOT_TYPES = ("goal", "shot", "save")
+
+
 def generate_description(
     candidates: list,
     approved: list,
@@ -304,46 +308,37 @@ def generate_description(
     post_sec: float = 5.0,
 ) -> str:
     """
-    승인된 후보 구간으로 YouTube 챕터 마커 설명 생성.
-    - 챕터 표기: type == 'goal' 인 구간만 표시
-    - 타임스탬프: 하이라이트 영상 내 누적 위치 기준 (비-goal 구간도 시간은 누적)
+    승인된 후보 구간으로 YouTube 설명(장면 타임스탬프 목록) 생성.
+    - 표기: 골·슈팅·세이브(goal/shot/save)를 모두 '슈팅'으로 묶어 표시. 판정 모델(3.1 Flash-Lite)이
+      골과 빗나간 슈팅을 구분하지 못해 득점 여부는 적지 않는다. 같은 이유로 모델의 한 줄 설명(reason)도
+      쓰지 않는다 — 실제 골에 '빗나간 슈팅'이라고 적히곤 했다.
+    - 타임스탬프: 하이라이트 영상 내 누적 위치 기준 (목록에 없는 구간도 시간은 누적)
+    - 해당 장면이 없으면 목록을 통째로 뺀다.
     """
     from soccer_highlights import get_merged_timeline
     base_name = video_name.rsplit(".", 1)[0]
-    lines = [f"축구 하이라이트 — {base_name}", ""]
+    lines = [f"축구 하이라이트 — {base_name}"]
 
     approved_cands = [candidates[idx] for idx in approved if idx < len(candidates)]
     _, cand_timestamps = get_merged_timeline(approved_cands, pre_sec, post_sec)
 
-    goal_lines = []
-    goal_count = 0
-
+    shot_lines = []
     for idx in sorted(approved):
         if idx >= len(candidates):
             continue
         c = candidates[idx]
         ctype = (c.get("type") or "").strip().lower()
+        if ctype not in SHOT_TYPES:
+            continue
 
-        if ctype == "goal":
-            goal_count += 1
-            ts_hl_sec = cand_timestamps.get(id(c), 0.0)
-            mins = int(ts_hl_sec // 60)
-            secs = int(ts_hl_sec % 60)
-            ts_hl = f"{mins}:{secs:02d}"
+        ts_hl_sec = cand_timestamps.get(id(c), 0.0)
+        ts_hl = f"{int(ts_hl_sec // 60)}:{int(ts_hl_sec % 60):02d}"
+        peak = float(c.get("peak", 0))
+        ts_orig = f"{int(peak // 60)}:{int(peak % 60):02d}"
+        shot_lines.append(f"{ts_hl} 슈팅 #{len(shot_lines) + 1}  (원본 {ts_orig})")
 
-            peak  = float(c.get("peak", 0))
-            orig_min = int(peak // 60)
-            orig_sec = int(peak % 60)
-            ts_orig  = f"{orig_min}:{orig_sec:02d}"
-
-            reason = (c.get("reason") or "").strip()
-            label  = reason if reason else f"득점 #{goal_count}"
-            goal_lines.append(f"{ts_hl} {label}  (원본 {ts_orig})")
-
-    if goal_lines:
-        lines += goal_lines
-    else:
-        lines.append("(득점 장면 없음)")
+    if shot_lines:
+        lines += ["", "슈팅 장면", *shot_lines]
 
     lines += [
         "",
@@ -445,7 +440,7 @@ def publish_highlight(
     post_sec: float = 5.0,
     on_progress=None,
 ) -> str:
-    """하이라이트 한 편을 썸네일·득점 챕터 설명과 함께 YouTube에 올리고 URL을 반환한다.
+    """하이라이트 한 편을 썸네일·슈팅 장면 설명과 함께 YouTube에 올리고 URL을 반환한다.
 
     웹 앱(routes_auth.upload_job_to_youtube)과 Kaggle 인박스 러너가 같이 쓴다.
     썸네일은 승인 구간 중 신뢰도가 가장 높은 후보의 peak 프레임을 원본(source_video)에서 뽑는다.

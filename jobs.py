@@ -489,9 +489,7 @@ def _process(jid):
         clear_progress(jid)
         log.info("[%s] 판별 중 취소됨", jid)
         return
-    cost = (usage["in"] / 1e6 * sh.PRICE_IN_PER_M +
-            usage["out"] / 1e6 * sh.PRICE_OUT_PER_M)
-    usage["cost_usd"] = round(cost, 4)
+    usage["cost_usd"] = round(sh.estimate_cost_usd(usage), 4)
 
     sh.save_results(
         str(config.RESULTS_DIR / f"results_{jid}.json"),

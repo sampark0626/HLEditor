@@ -115,7 +115,7 @@ Kaggle이 프로세스를 강제로 죽이는 드문 경우엔 그 실행의 결
 | 자동 실행 스위치 | Google Apps Script 주기 확인(일·월 5분 / 그 외 1시간). 선택: 아이폰 단축어 자동화로 즉시 실행. 자세한 규칙은 3-3 | 무료 |
 | 처리 | Kaggle 비공개 스크립트 커널 (평소 CPU, 2D 요청 시만 GPU T4) | 무료 (GPU는 주간 한도) |
 | 알림 | ntfy (iOS 앱 + ntfy.sh 공개 서버) | 무료 |
-| AI 판별 | Gemini API | 경기당 $0.10~0.14 (지금과 같음) |
+| AI 판별 | Gemini API | 경기당 약 $0.03~0.04 (`gemini-3.1-flash-lite`, 2026-11-25 교체) |
 
 ### 1-3. 비목표 (v1에서 하지 않음)
 
@@ -223,7 +223,7 @@ Kaggle이 프로세스를 강제로 죽이는 드문 경우엔 그 실행의 결
   - 팬과 Gemini는 작업 디렉터리를 나눠 쓴다(`work/pan`, `work/vision`).
   - 팬 분석이 실패해도 경고만 남기고 계속한다(`jobs._process`와 같은 원칙).
   - 채택된 구간이 0개면 YouTube에 올리지 않는다. "하이라이트 없음"을 알리고 원본은 `03_done`으로 보낸다(실패가 아님).
-- **YouTube:** `youtube_uploader.publish_highlight(...)`를 쓴다(1-3). 썸네일, 득점 챕터 설명,
+- **YouTube:** `youtube_uploader.publish_highlight(...)`를 쓴다(1-3). 썸네일, 슈팅 장면 설명,
   `make_title(DEFAULT_TITLE, "{n}경기", match_date)`까지 포함한다. 공개 범위는 비밀값의 `YOUTUBE_PRIVACY`를 따른다.
   업로드에 실패하면 하이라이트 mp4를 `05_output`에 올리고 Drive 링크를 담아 실패 알림을 보낸다. 원본은 `03_done`으로 보내 다시 빌드할 수 있게 둔다.
 - **상태와 알림 글:**
@@ -393,7 +393,7 @@ Kaggle이 프로세스를 강제로 죽이는 드문 경우엔 그 실행의 결
   - `output/_merged/ea2f5577.mp4`(실제 41분 경기)를 ffmpeg `-c copy`로 30분과 11분 두 파트로 자른다.
   - 두 파트를 LocalStore inbox에 넣고 `--dry-run`으로 실행한다.
   - 확인할 것: 두 파트가 한 경기로 병합되는지, 하이라이트 mp4가 생성되는지(워터마크 포함), BAND 글이 출력되는지.
-- Gemini를 실제로 호출하면 약 $0.14가 든다. 먼저 사용자 승인을 받거나 `--no-vision`으로 흐름만 확인한다.
+- Gemini를 실제로 호출하면 약 $0.04가 든다. 먼저 사용자 승인을 받거나 `--no-vision`으로 흐름만 확인한다.
 
 ### Phase 3 — Kaggle 연결 (수동 트리거로 검증)
 

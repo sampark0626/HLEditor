@@ -96,7 +96,7 @@ def upload_job_to_youtube(jid: str, title: str, privacy: str):
         def _on_prog(done, total):
             jobs.update(jid, yt_progress={"done": done, "total": total})
 
-        # 썸네일(최고 신뢰 승인 후보)·득점 챕터 설명·업로드는 Kaggle 인박스 러너와 같은 경로를 쓴다
+        # 썸네일(최고 신뢰 승인 후보)·슈팅 장면 설명·업로드는 Kaggle 인박스 러너와 같은 경로를 쓴다
         yt_url = yt_up.publish_highlight(
             output, job["video"],
             job.get("candidates") or [], job.get("approved") or [],

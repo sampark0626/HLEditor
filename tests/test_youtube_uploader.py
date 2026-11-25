@@ -3,45 +3,41 @@
 import youtube_uploader as yt_up
 
 
-def test_no_goals_shows_placeholder():
-    candidates = [
-        {"peak": 5.0, "type": "shot", "reason": "슛"},
-    ]
+def test_no_shot_scenes_omits_list():
+    # 슈팅급 장면이 없으면 "(득점 장면 없음)" 같은 문구 없이 목록을 통째로 뺀다
+    candidates = [{"peak": 5.0, "type": "attack", "reason": "역습"}]
     desc = yt_up.generate_description(candidates, approved=[0], video_name="match.mp4")
-    assert "(득점 장면 없음)" in desc
+    assert "슈팅 장면" not in desc
+    assert "득점" not in desc
+    assert desc.splitlines()[:3] == ["축구 하이라이트 — match", "", "---"]
 
 
-def test_goal_timestamps_are_cumulative_not_original():
+def test_shot_timestamps_are_cumulative_not_original():
     # 승인된 각 구간은 pre_sec+post_sec 길이로 하이라이트 영상에 이어붙여지므로,
     # 원본 peak 시각이 아니라 하이라이트 영상 내 누적 위치가 타임스탬프로 나와야 한다.
     candidates = [
-        {"peak": 100.0, "type": "goal", "reason": "선제골"},
-        {"peak": 500.0, "type": "shot", "reason": "슛"},   # 승인 안 됨
+        {"peak": 100.0, "type": "shot", "reason": "빗나간 슈팅"},
+        {"peak": 500.0, "type": "attack", "reason": "역습"},   # 목록엔 없지만 시간은 누적
         {"peak": 900.0, "type": "goal", "reason": "쐐기골"},
     ]
     desc = yt_up.generate_description(
-        candidates, approved=[0, 2], video_name="match.mp4", pre_sec=8.0, post_sec=5.0)
-    lines = desc.splitlines()
-    # 첫 구간: 누적 0:00, 두 번째 승인 구간(idx=2, shot 제외하고 goal만 순회하지만
-    # cumulative는 approved 순서대로 매 구간마다 seg_dur(13초)씩 누적된다.
-    assert "0:00 선제골" in "\n".join(lines)
-    assert "(원본 1:40)" in "\n".join(lines)  # peak=100s = 1:40
+        candidates, approved=[0, 1, 2], video_name="match.mp4", pre_sec=8.0, post_sec=5.0)
+    assert "0:00 슈팅 #1  (원본 1:40)" in desc       # peak=100s = 1:40
+    assert "0:26 슈팅 #2  (원본 15:00)" in desc      # 13초 구간 두 개 뒤
 
 
-def test_only_goal_type_becomes_chapter():
+def test_goal_shot_save_all_listed_as_shot_without_reason():
+    # 판정 모델이 골과 빗나간 슈팅을 구분하지 못하므로 득점 여부·모델 설명(reason)을 적지 않는다
     candidates = [
-        {"peak": 10.0, "type": "save", "reason": "선방"},
-        {"peak": 20.0, "type": "goal", "reason": "득점"},
+        {"peak": 10.0, "type": "goal", "reason": "득점 성공"},
+        {"peak": 40.0, "type": "save", "reason": "선방"},
+        {"peak": 70.0, "type": "shot", "reason": "빗나간 슈팅"},
+        {"peak": 100.0, "type": "other", "reason": "대기"},
     ]
-    desc = yt_up.generate_description(candidates, approved=[0, 1], video_name="match.mp4")
-    assert "선방" not in desc
-    assert "득점" in desc
-
-
-def test_reason_fallback_when_missing():
-    candidates = [{"peak": 10.0, "type": "goal", "reason": ""}]
-    desc = yt_up.generate_description(candidates, approved=[0], video_name="match.mp4")
-    assert "득점 #1" in desc
+    desc = yt_up.generate_description(candidates, approved=[0, 1, 2, 3], video_name="match.mp4")
+    assert "슈팅 #3" in desc and "슈팅 #4" not in desc
+    for reason in ("득점 성공", "선방", "빗나간 슈팅", "대기"):
+        assert reason not in desc
 
 
 def test_footer_and_title_present():
@@ -270,7 +266,7 @@ def test_publish_highlight_uses_best_approved_candidate_for_thumbnail():
     assert seen["thumb"] == ("src.mp4", 30.0)
     path, title, desc, privacy = seen["upload"]
     assert (path, title, privacy) == ("out.mp4", "제목", "unlisted")
-    assert "선제골" in desc and desc.startswith("축구 하이라이트 — 1경기")
+    assert "슈팅 #1" in desc and desc.startswith("축구 하이라이트 — 1경기")
     assert not os.path.exists(seen["thumb_path"])   # 임시 썸네일은 정리된다
 
 

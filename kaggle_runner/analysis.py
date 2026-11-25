@@ -43,8 +43,7 @@ def analyze_candidates(video, workdir, cands: list, *, gemini_key: str | None = 
             client = genai.Client(api_key=gemini_key)
             usage = sh.classify_all_parallel(cands, str(video), vision_dir, client,
                                              sh.CONF_AUTO, workers or sh.VISION_WORKERS)
-            usage["cost_usd"] = round(usage["in"] / 1e6 * sh.PRICE_IN_PER_M
-                                      + usage["out"] / 1e6 * sh.PRICE_OUT_PER_M, 4)
+            usage["cost_usd"] = round(sh.estimate_cost_usd(usage), 4)
             info["vision_used"] = True
             info["usage"] = usage
 

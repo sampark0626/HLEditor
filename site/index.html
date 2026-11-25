@@ -417,7 +417,7 @@ footer p{margin:0}
         <p>Kaggle 노트북이 영상을 이어 붙이고, 소리·카메라 움직임·AI로 장면을 골라 하이라이트를 만들어요.</p></div></li>
       <li class="step reveal"><span class="node"><svg><use href="#i-play"/></svg></span><div class="body">
         <h3><small>05</small>YouTube 업로드 <span class="tag">자동</span></h3>
-        <p>제목, 득점 챕터, 썸네일까지 붙여서 올려요.</p></div></li>
+        <p>제목, 슈팅 장면 시각, 썸네일까지 붙여서 올려요.</p></div></li>
       <li class="step h reveal"><span class="node"><svg><use href="#i-bell"/></svg></span><div class="body">
         <h3><small>06</small>알림 → BAND <span class="tag h">사람</span></h3>
         <p>알림이 한 통 오면 눌러서 복사하고, BAND에 붙여넣으면 끝이에요.</p></div></li>
@@ -461,7 +461,7 @@ footer p{margin:0}
       <article class="card stage reveal"><span class="n">2</span><span class="ic"><svg><use href="#i-pan"/></svg></span>
         <h3>카메라 움직임</h3><p>골문 앞에서 멈췄거나 빠르게 돈 후보에 가산점(+0.10)을 줘요. 감점은 없어요.</p><span class="cost">무료 · 로컬 계산</span></article>
       <article class="card stage reveal"><span class="n">3</span><span class="ic"><svg><use href="#i-eye"/></svg></span>
-        <h3>AI의 눈</h3><p>후보 구간의 화면을 Gemini가 보고 골·슈팅·세이브인지, 얼마나 확실한지 판단해요.</p><span class="cost">경기당 약 $0.1</span></article>
+        <h3>AI의 눈</h3><p>후보 구간의 화면을 Gemini가 보고 영상에 넣을 장면인지, 얼마나 확실한지 판단해요.</p><span class="cost">경기당 약 $0.04</span></article>
     </div>
     <div class="card result reveal">
       <h3>실측 예시<small>9월 6일 경기 · 10분 구간</small></h3>
@@ -505,13 +505,14 @@ footer p{margin:0}
         <h3 class="sub">자동으로 붙는 영상 설명 <span class="tag">예시</span></h3>
 <pre class="desc" aria-label="자동 생성되는 YouTube 영상 설명 예시">축구 하이라이트 — 5경기
 
-<span class="t">0:18</span> 오른발 중거리 슛이 골망을 흔듦  <span class="c">(원본 5:42)</span>
-<span class="t">1:04</span> 코너킥 이후 헤더 득점  <span class="c">(원본 14:09)</span>
-<span class="t">2:31</span> 역습에서 1대1 마무리  <span class="c">(원본 21:37)</span>
+슈팅 장면
+<span class="t">0:18</span> 슈팅 #1  <span class="c">(원본 5:42)</span>
+<span class="t">1:04</span> 슈팅 #2  <span class="c">(원본 14:09)</span>
+<span class="t">2:31</span> 슈팅 #3  <span class="c">(원본 21:37)</span>
 
 <span class="c">---
 이 영상은 HLEditor로 자동 생성된 하이라이트입니다.</span></pre>
-        <p class="small">득점 장면이 챕터로 붙어서, 보다가 바로 이동할 수 있어요. (내용은 예시)</p>
+        <p class="small">슈팅 장면의 시각이 붙어서, 보다가 바로 이동할 수 있어요. 골인지 아닌지는 AI가 잘 못 가려서 적지 않아요. (내용은 예시)</p>
       </div>
     </div>
 
@@ -544,7 +545,7 @@ footer p{margin:0}
       <h2>얼마나 들고,<br>얼마나 걸릴까요</h2>
     </div>
     <div class="tiles reveal">
-      <div class="tile"><b>$0.1</b><span>경기당<br>AI 비용</span></div>
+      <div class="tile"><b>$0.04</b><span>경기당<br>AI 비용</span></div>
       <div class="tile"><b>20분</b><span>마지막 업로드 후<br>알림 대기</span></div>
       <div class="tile"><b>7일</b><span>원본<br>자동 정리</span></div>
     </div>

@@ -122,7 +122,7 @@ python3 soccer_highlights.py --from-json results.json --conf 0.55 -o highlights.
 | `PRE_SEC` / `POST_SEC` (8 / 5) | peak 앞뒤 클립 길이 | 빌드업 포함 위해 앞을 길게 |
 | `FRAME_INTERVAL` (0.5) | 비전용 프레임 추출 간격 | 골 순간 놓치면 ↓ |
 | `MAX_FRAMES` (8) | 후보당 Gemini 전송 프레임 수 | 비용/정확도 trade-off |
-| `VISION_MODEL` | gemini-2.5-flash | 정확도 필요시 gemini-2.5-pro |
+| `VISION_MODEL` (`GEMINI_MODEL`) | gemini-3.1-flash-lite | 2.5 Flash는 2026-12-01 종료. 골 구분이 필요하면 더 비싼 Flash 계열 |
 | `CONF_AUTO` (0.70) | 자동 채택 임계 | 좋은 장면 누락시 ↓ |
 | `CONF_MAYBE` (0.40) | '확인필요' 분류 하한 | — |
 
@@ -149,7 +149,7 @@ XbotGo 고정 카메라로 촬영된 학교 운동장 동호회 경기 약 4분 
 4분에 후보 17개였으니 30분이면 단순 비례로 **100개 이상 후보**가 나올 수 있다. 후보마다 Gemini 호출이 1번씩 일어나므로:
 - 먼저 `--no-vision --dry-run`으로 후보 수를 확인하고
 - 후보가 과하면 임계(`SPIKE_PERCENTILE` 97~98, `SPIKE_MIN_DB` 10+)를 올려 비전 호출 자체를 줄인다
-- `gemini-2.5-flash`는 저렴하지만 호출 수가 많아지면 누적되므로, 후보를 먼저 솎는 게 비용 측면에서 핵심
+- `gemini-3.1-flash-lite`는 후보당 약 1원으로 저렴하지만 호출 수가 많아지면 누적되므로, 후보를 먼저 솎는 게 비용 측면에서 핵심
 
 ### 2. 최종 재인코딩 시간
 `build_output`은 채택 구간을 `libx264`로 재인코딩 후 concat한다. 채택 구간이 수십 개면 이 단계가 가장 느리다. 대응:

@@ -65,7 +65,11 @@ POST_SEC       = 5.0    # 급증 시점 기준 뒤로 포함할 길이 (초)
 
 FRAME_INTERVAL = 0.5    # 비전 판별용 프레임 추출 간격 (초)
 MAX_FRAMES     = int(config.get_env("MAX_FRAMES", "12"))      # 후보당 Gemini에 보낼 최대 프레임 수
-VISION_MODEL   = config.get_env("GEMINI_MODEL", "gemini-2.5-flash")   # 비용/속도 균형. 정확도 더 원하면 gemini-2.5-pro
+# 2.5 Flash는 2026-12-01 종료. 3.1 Flash-Lite는 실측(2026-11-25)에서 넣을 장면·뺄 장면은 2.5 Flash와 같게 고르지만
+# 골/빗나간 슈팅 구분(type)은 거의 못 한다 — 그래서 유튜브 설명은 골·슈팅·세이브를 '슈팅'으로 묶어 적는다
+# (youtube_uploader.generate_description). 생각(thinking)은 켜지 않는다:
+# 켜면 골이 아닌 장면을 '득점'으로 지어냈다. 후보당 약 1원으로 2.5 Flash의 약 1/5.
+VISION_MODEL   = config.get_env("GEMINI_MODEL", "gemini-3.1-flash-lite")
 VISION_WORKERS = 6      # 비전 호출 동시 병렬 수 (Gemini rate limit 고려해 4~8 권장)
 VISION_RETRIES = 4      # 503/429 등 일시적 오류 시 후보당 최대 재시도 횟수
 RETRY_BASE_SEC = 2.0    # 재시도 지수 백오프 기준 (2,4,8,... 초 + 지터)
@@ -128,13 +132,34 @@ TITLE_FONT     = _resolve_title_font()
 TITLE_FONTSIZE = 22
 TITLE_MARGIN   = 24     # 우/상단 여백 (px)
 
-# --- Gemini 단가 (USD per 1M tokens, 모델별 가변) ---
-if "pro" in VISION_MODEL.lower():
-    PRICE_IN_PER_M  = 3.00
-    PRICE_OUT_PER_M = 9.00
-else:
-    PRICE_IN_PER_M  = 0.30
-    PRICE_OUT_PER_M = 2.50
+# --- Gemini 단가 (USD per 1M tokens, 2026-11-25 공식 가격표) ---
+# (텍스트·이미지·영상 입력, 오디오 입력, 출력) — 생각(thinking) 토큰은 출력 단가로 청구된다.
+GEMINI_PRICES = {
+    "gemini-3.1-flash-lite": (0.25, 0.50, 1.50),
+    "gemini-3.5-flash-lite": (0.30, 0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.30, 0.40),
+    "gemini-2.5-flash":      (0.30, 1.00, 2.50),
+}
+# 표에 없는 모델은 2.5 Flash 단가로 어림한다(실제와 다를 수 있음).
+_FALLBACK_PRICE = GEMINI_PRICES["gemini-2.5-flash"]
+
+
+def gemini_price(model=None):
+    """모델 이름에 맞는 (입력, 오디오 입력, 출력) 단가. '-preview' 같은 접미어가 붙어도 가장 긴 접두어로 찾는다."""
+    model = (model or VISION_MODEL).lower()
+    for name in sorted(GEMINI_PRICES, key=len, reverse=True):
+        if model.startswith(name):
+            return GEMINI_PRICES[name]
+    return _FALLBACK_PRICE
+
+
+def estimate_cost_usd(usage, model=None):
+    """classify_all_parallel 사용량 dict로 비용(USD)을 어림한다. 생각 토큰도 출력 단가로 센다."""
+    p_in, p_audio, p_out = gemini_price(model)
+    tokens_in = usage.get("in", 0)
+    audio = min(usage.get("audio", 0), tokens_in)
+    out = usage.get("out", 0) + usage.get("thoughts", 0)
+    return ((tokens_in - audio) * p_in + audio * p_audio + out * p_out) / 1e6
 
 
 # ----------------------------------------------------------------------------
@@ -425,7 +450,7 @@ def classify_with_gemini(video_path, client):
 
     503(과부하)/429(rate limit) 같은 일시적 오류는 지수 백오프로 재시도한다.
     재시도까지 모두 실패하면 예외를 올려 호출부(_process)가 후보 단위로 격리한다.
-    usage: {"in": 입력토큰, "out": 출력토큰}
+    usage: {"in": 입력토큰(오디오 포함), "audio": 그중 오디오 토큰, "out": 출력토큰, "thoughts": 생각토큰}
     """
     from google.genai import types
 
@@ -474,7 +499,9 @@ def classify_with_gemini(video_path, client):
     um = getattr(resp, "usage_metadata", None)
     usage = {
         "in": int(getattr(um, "prompt_token_count", 0) or 0),
+        "audio": _audio_tokens(um),
         "out": int(getattr(um, "candidates_token_count", 0) or 0),
+        "thoughts": int(getattr(um, "thoughts_token_count", 0) or 0),
     }
     txt = resp.text.strip().replace("```json", "").replace("```", "").strip()
     try:
@@ -483,6 +510,17 @@ def classify_with_gemini(video_path, client):
         return ({"highlight": False, "type": "other", "confidence": 0.0,
                  "reason": f"parse_error: {txt[:80]}"}, usage)
     return _coerce_classification(parsed, txt), usage
+
+
+def _audio_tokens(um):
+    """입력 토큰 중 오디오 몫. 2.5 계열은 mp4 속 소리를 AUDIO로 따로 보고하고, 3.x 계열은 보고하지 않는다(0)."""
+    total = 0
+    for d in (getattr(um, "prompt_tokens_details", None) or []):
+        modality = getattr(d, "modality", None)
+        name = getattr(modality, "name", None) or str(modality or "")
+        if name.upper().endswith("AUDIO"):
+            total += int(getattr(d, "token_count", 0) or 0)
+    return total
 
 
 def _coerce_classification(parsed, raw_txt=""):
@@ -514,12 +552,12 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
     should_cancel: 호출하면 True를 돌려주는 콜러블. True가 되면 아직 시작되지
         않은 작업을 취소하고 루프를 빠져나온다(진행 중인 호출만 마무리됨).
     반환: 사용량/진행 요약 dict
-        {"in":입력토큰, "out":출력토큰, "calls":실제호출수,
+        {"in":입력토큰, "audio":그중 오디오, "out":출력토큰, "thoughts":생각토큰, "calls":실제호출수,
          "classified":판별완료수, "total":전체후보수, "cancelled":bool}
     """
     # 완료 순서와 무관하게 원본 인덱스(idx)를 키로 결과를 모은다
     results = {}
-    usage_total = {"in": 0, "out": 0, "calls": 0}
+    usage_total = {"in": 0, "audio": 0, "out": 0, "thoughts": 0, "calls": 0}
     # 한 후보라도 결제·크레딧 오류가 나면 남은 후보는 부르지 않는다 — 어차피 모두 같은 오류로 실패한다.
     billing_stop = threading.Event()
 
@@ -579,8 +617,8 @@ def classify_all_parallel(cands, video, workdir, client, conf_auto, workers,
             cands[idx].update(res)
 
             if usage:
-                usage_total["in"] += usage["in"]
-                usage_total["out"] += usage["out"]
+                for key in ("in", "audio", "out", "thoughts"):
+                    usage_total[key] += usage.get(key, 0)
                 usage_total["calls"] += 1
             c = cands[idx]
             conf = float(res.get("confidence", 0))
@@ -986,9 +1024,8 @@ def main():
             print(f"[3/4] Gemini 비전 판별 ({VISION_MODEL}, 병렬 {workers}개)...")
             usage = classify_all_parallel(cands, video, workdir, client,
                                           args.conf, workers)
-            cost = (usage["in"] / 1e6 * PRICE_IN_PER_M +
-                    usage["out"] / 1e6 * PRICE_OUT_PER_M)
-            print(f"      토큰: 입력 {usage['in']:,} / 출력 {usage['out']:,} "
+            cost = estimate_cost_usd(usage)
+            print(f"      토큰: 입력 {usage['in']:,} / 출력 {usage['out']:,} / 생각 {usage['thoughts']:,} "
                   f"({usage['calls']}회 호출) ≈ ${cost:.4f}")
         else:
             print("[3/4] 비전 판별 생략 — 오디오 후보 전체 사용")
