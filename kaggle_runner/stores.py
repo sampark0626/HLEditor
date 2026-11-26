@@ -90,7 +90,7 @@ class LocalStore:
     def download(self, f: RemoteFile, dest) -> Path:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        for key in ("processing", "inbox", "inbox_2d", "done", "failed"):
+        for key in ("processing", "inbox", "inbox_2d", "done", "failed", "clips"):
             path = self._dir(key) / f.id
             if path.exists():
                 shutil.copyfile(path, dest)

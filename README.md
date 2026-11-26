@@ -44,7 +44,9 @@
 | `youtube_uploader.py` | YouTube OAuth 2.0 · 영상 업로드 · 썸네일 추출 · 챕터 설명 생성 |
 | `band_poster.py` | BAND OAuth 2.0 · 날짜별 게시글 작성 |
 | `kaggle_runner/inbox_runner.py` | **아이폰 자동 처리** — Drive `01_inbox`에 올린 영상을 Kaggle에서 처리해 YouTube 업로드 + ntfy 알림 |
-| `kaggle_runner/apps_script/Code.gs` | 아이폰 자동 처리의 실행 스위치(Google Apps Script) — 인박스에 영상이 있으면 Kaggle 커널 실행 |
+| `kaggle_runner/apps_script/Code.gs` | 아이폰 자동 처리의 실행 스위치(Google Apps Script) — 인박스에 영상이 있으면 Kaggle 커널 실행. 검토 페이지 서버 함수·매일 09:00 자동 게시도 여기 |
+| `kaggle_runner/apps_script/Review.html` | 검토 페이지(폰용) — 청백전/상대팀·장면별 공격/수비·실점·잘못 잡힘 태깅 후 게시 |
+| `kaggle_runner/publish.py`·`tags.py`·`naming.py` | 검토 뒤 게시 단계, 주간/월간 클립 규칙(`tests/data/tag_rules.json`을 Apps Script와 공유), 이름 규칙 |
 | `kaggle_runner/run_match.py` | Kaggle 노트북에 붙여넣어 쓰는 수동 배치 러너 (2D 변환은 `ENABLE_DOTPLAY`로 선택) |
 | `tools/make_kaggle_secrets.py` | 아이폰 자동 처리용 비밀값(`hl_secrets.json`)과 Drive 폴더를 만드는 1회용 도구 |
 | `templates/index.html` | 웹 UI 뼈대 (큐 관리 / 리뷰 / 영상 생성 3탭) |
@@ -182,7 +184,9 @@ python app.py
 
 - 서버·웹호스팅 없음: Google Drive(업로드) + Google Apps Script(실행 스위치) + Kaggle(처리) + ntfy(알림)
 - 확인 주기: 일·월요일 5분마다, 그 외 1시간마다 (`FAST_DAYS`로 변경)
-- 검토 단계 없이 AI 판단(`CONF_AUTO` + 팬 보정)으로 채택. 2D 변환은 `01_inbox_2d`에 올린 경기만
+- 기본은 검토 단계 없이 AI 판단(`CONF_AUTO` + 팬 보정)으로 채택. 2D 변환은 `01_inbox_2d`에 올린 경기만
+- 선택 기능(`HL_REVIEW`): 분석 뒤 **폰의 검토 페이지에서 청백전/상대팀을 태깅하고 게시**(안 하면 다음 날 09:00 자동 게시).
+  게시 이름은 `날짜-경기번호-상대팀`, 클립은 Drive `06_clips`에 남아 월간 영상의 재료가 됩니다 — 설치는 INBOX_SETUP.md의 "검토 후 게시"
 - 비용: Gemini 경기당 약 $0.03~0.04 (`gemini-3.1-flash-lite`, PC 처리와 동일)
 
 처음 한 번 설정(약 40분)은 [kaggle_runner/INBOX_SETUP.md](kaggle_runner/INBOX_SETUP.md)를 따라 하세요.

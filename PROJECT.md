@@ -51,7 +51,7 @@
 | `IMPROVEMENT_PLAN.md` | 2026-07 리팩터 계획과 실행 로그 (무엇을 왜 바꿨는지의 상세 기록) |
 | `PRIVACY.md` | BAND API 심사용 개인정보처리방침 |
 | `dotplay/`, `jobs_dotplay.py`, `routes_dotplay.py`, `static/js/dotplay.js` | Dot Play(FM 스타일 2D 버드뷰 변환) 기능 일체 — 자세한 내용은 아래 [Dot Play](#dot-play-fm-스타일-2d-버드뷰-변환--2026-0719-20-통합) 섹션 |
-| `kaggle_runner/` | Kaggle 실행기 — `run_match.py`(수동 배치), `inbox_runner.py`(아이폰 자동 처리)와 그 부품(`grouping`/`stores`/`notify`/`analysis`), `kernel_bootstrap.py`, `apps_script/Code.gs`(+`code_test.js`) — 아래 [아이폰 원스톱 자동화](#아이폰-원스톱-자동화--2026-09-26) 섹션 |
+| `kaggle_runner/` | Kaggle 실행기 — `run_match.py`(수동 배치), `inbox_runner.py`(아이폰 자동 처리)와 그 부품(`grouping`/`stores`/`notify`/`analysis`/`naming`/`common`), 검토 후 게시(`publish`/`tags`), `kernel_bootstrap.py`, `apps_script/Code.gs`·`Review.html`(+`code_test.js`) — 아래 [아이폰 원스톱 자동화](#아이폰-원스톱-자동화--2026-09-26) 섹션 |
 | `tools/make_kaggle_secrets.py` | 아이폰 자동 처리용 비밀값 파일·Drive 폴더를 만드는 PC용 1회성 도구 |
 | `MOBILE_PLAN.md` | 아이폰 자동화 설계·계획서(결정 근거·실행 로그) |
 
@@ -386,7 +386,15 @@ YouTube에 올리고, **ntfy 알림으로 그날의 BAND 글 전체**를 보낸�
    커널 ERROR → Apps Script 연속 실패 3회면 서킷브레이커(`resetBreaker()`로 해제).
 6. **처리 중 죽은 파일은 다음 실행이 되돌린다**(`recover_processing`). 같은 파일로 3번 죽으면 실패로 보낸다.
 7. **YouTube 업로드 실패 시** 하이라이트를 Drive `05_output`에 백업하고 링크를 알린다(원본은 `03_done`).
-8. **완료 알림엔 click을 넣지 않는다** — ntfy iOS는 click이 없으면 탭할 때 본문을 복사한다.
+8. **BAND 글 알림엔 click을 넣지 않는다** — ntfy iOS는 click이 없으면 탭할 때 본문을 복사한다.
+   (검토 모드의 "검토 준비" 알림은 반대로 click=검토 페이지.)
+8-1. **검토 모드(`HL_REVIEW`, 2026-11 Phase 2)** — [MONTHLY_PLAN.md](MONTHLY_PLAN.md). 분석 단계는 클립을 `06_clips`에 올리고
+   `_state/games_{날짜}_{n경기}.json`을 `pending`으로 만든다(YouTube 게시 없음, 알림은 BAND 글 대신 "검토 준비", click=검토 페이지).
+   Apps Script(`Review.html`·`reviewPublish`·`dailyJobs`)가 `publish`로 바꾸고 `_state/requests.json` 대기열에 넣으면 러너가
+   `publish.py`로 **"잘못 잡힘"만 뺀 전체 클립**을 이어 올린다(상대 득점 장면은 빼지 않음). 상태 전이의 쓰는 쪽은 상태별로 나뉜다
+   (pending·태그·publish 요청 = Apps Script, running 이후 = 러너 — `requests.json`은 Apps Script만 쓰고 러너는 읽기만).
+   주간/월간 클립 규칙은 `tags.py`와 `Code.gs`가 같고 `tests/data/tag_rules.json`을 양쪽 테스트가 읽는다.
+   클립 보관에 실패하면 검토 없이 예전처럼 바로 게시한다(영상을 잃지 않는다).
 9. `kernel_bootstrap.py`는 main 브랜치를 매번 clone한다 → **main에 push하면 바로 운영에 반영**된다.
    Apps Script에 같은 내용의 내장 사본(`BOOTSTRAP_FALLBACK`)이 있어, 바꾸면 둘 다 고친다
    (`node kaggle_runner/apps_script/code_test.js`가 둘이 같은지 검사한다).

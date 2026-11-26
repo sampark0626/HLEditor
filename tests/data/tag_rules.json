@@ -1,0 +1,557 @@
+{
+ "_doc": "MONTHLY_PLAN.md 3-2·3-3 규칙 표 — Python(tests/test_tags.py)과 Apps Script(code_test.js)가 같이 읽는다. 한쪽을 고치면 양쪽 구현이 같이 통과해야 한다.",
+ "sideCases": [
+  {
+   "name": "판단 근거가 없으면 None",
+   "clip": {
+    "idx": 1,
+    "end": null
+   },
+   "game": {
+    "attack_end": "building"
+   },
+   "side": null
+  },
+  {
+   "name": "클립 end가 공격 골대면 공격",
+   "clip": {
+    "idx": 1,
+    "end": "building"
+   },
+   "game": {
+    "attack_end": "building"
+   },
+   "side": "attack"
+  },
+  {
+   "name": "클립 end가 반대 골대면 수비",
+   "clip": {
+    "idx": 1,
+    "end": "tree"
+   },
+   "game": {
+    "attack_end": "building"
+   },
+   "side": "defense"
+  },
+  {
+   "name": "사람이 누른 side_override가 end보다 우선",
+   "clip": {
+    "idx": 1,
+    "end": "building"
+   },
+   "game": {
+    "attack_end": "building",
+    "clip_tags": {
+     "1": {
+      "side_override": "defense"
+     }
+    }
+   },
+   "side": "defense"
+  },
+  {
+   "name": "end·attack_end가 없어도 side_override면 판단",
+   "clip": {
+    "idx": 1,
+    "end": null
+   },
+   "game": {
+    "clip_tags": {
+     "1": {
+      "side_override": "attack"
+     }
+    }
+   },
+   "side": "attack"
+  },
+  {
+   "name": "경기에 attack_end가 없으면 None",
+   "clip": {
+    "idx": 1,
+    "end": "building"
+   },
+   "game": {},
+   "side": null
+  },
+  {
+   "name": "모르는 side_override 값은 무시",
+   "clip": {
+    "idx": 1,
+    "end": "tree"
+   },
+   "game": {
+    "attack_end": "tree",
+    "clip_tags": {
+     "1": {
+      "side_override": "bogus"
+     }
+    }
+   },
+   "side": "attack"
+  },
+  {
+   "name": "여기부터 반대: switch_at_idx 클립부터 뒤집힘(포함)",
+   "clip": {
+    "idx": 5,
+    "end": "building"
+   },
+   "game": {
+    "attack_end": "building",
+    "switch_at_idx": 5
+   },
+   "side": "defense"
+  },
+  {
+   "name": "여기부터 반대: 그 앞 클립은 그대로",
+   "clip": {
+    "idx": 4,
+    "end": "building"
+   },
+   "game": {
+    "attack_end": "building",
+    "switch_at_idx": 5
+   },
+   "side": "attack"
+  },
+  {
+   "name": "여기부터 반대: 반대편 골대로 뒤집으면 공격",
+   "clip": {
+    "idx": 6,
+    "end": "tree"
+   },
+   "game": {
+    "attack_end": "building",
+    "switch_at_idx": 5
+   },
+   "side": "attack"
+  },
+  {
+   "name": "모르는 end 값은 None",
+   "clip": {
+    "idx": 1,
+    "end": "sky"
+   },
+   "game": {
+    "attack_end": "building"
+   },
+   "side": null
+  },
+  {
+   "name": "태그 키는 문자열 번호",
+   "clip": {
+    "idx": 12,
+    "end": null
+   },
+   "game": {
+    "clip_tags": {
+     "12": {
+      "side_override": "defense"
+     }
+    }
+   },
+   "side": "defense"
+  }
+ ],
+ "eligibleCases": [
+  {
+   "name": "청백전: 잘못 잡힘만 빼고 전부(실점 표시는 무시)",
+   "game": {
+    "kind": "scrimmage",
+    "clip_tags": {
+     "2": {
+      "removed": true
+     },
+     "3": {
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": null
+    },
+    {
+     "idx": 2,
+     "end": null
+    },
+    {
+     "idx": 3,
+     "end": null
+    },
+    {
+     "idx": 4,
+     "end": null
+    }
+   ],
+   "eligible": [
+    1,
+    3,
+    4
+   ],
+   "weekly": [
+    1,
+    3,
+    4
+   ]
+  },
+  {
+   "name": "kind에 한글 '청백전'이 들어 있어도 청백전",
+   "game": {
+    "kind": "청백전"
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": null
+    },
+    {
+     "idx": 2,
+     "end": null
+    }
+   ],
+   "eligible": [
+    1,
+    2
+   ],
+   "weekly": [
+    1,
+    2
+   ]
+  },
+  {
+   "name": "다른 팀: 공격은 대상, 수비는 실점이 아닐 때만, 판단 불가는 제외 — 주간은 전부",
+   "game": {
+    "kind": "opponent",
+    "attack_end": "building",
+    "clip_tags": {
+     "3": {
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    },
+    {
+     "idx": 2,
+     "end": "tree"
+    },
+    {
+     "idx": 3,
+     "end": "tree"
+    },
+    {
+     "idx": 4,
+     "end": null
+    }
+   ],
+   "eligible": [
+    1,
+    2
+   ],
+   "weekly": [
+    1,
+    2,
+    3,
+    4
+   ]
+  },
+  {
+   "name": "잘못 잡힘은 월간·주간 모두에서 빠진다",
+   "game": {
+    "kind": "opponent",
+    "attack_end": "building",
+    "clip_tags": {
+     "2": {
+      "removed": true
+     },
+     "3": {
+      "removed": true,
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    },
+    {
+     "idx": 2,
+     "end": "building"
+    },
+    {
+     "idx": 3,
+     "end": "tree"
+    }
+   ],
+   "eligible": [
+    1
+   ],
+   "weekly": [
+    1
+   ]
+  },
+  {
+   "name": "side_override가 판단 불가 클립을 살리고, 실점이면 다시 뺀다",
+   "game": {
+    "kind": "opponent",
+    "attack_end": "building",
+    "clip_tags": {
+     "1": {
+      "side_override": "attack"
+     },
+     "2": {
+      "side_override": "defense",
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": null
+    },
+    {
+     "idx": 2,
+     "end": null
+    },
+    {
+     "idx": 3,
+     "end": null
+    }
+   ],
+   "eligible": [
+    1
+   ],
+   "weekly": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "name": "여기부터 반대(교대)가 있어도 동작한다",
+   "game": {
+    "kind": "opponent",
+    "attack_end": "building",
+    "switch_at_idx": 3,
+    "clip_tags": {
+     "3": {
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    },
+    {
+     "idx": 2,
+     "end": "tree"
+    },
+    {
+     "idx": 3,
+     "end": "building"
+    },
+    {
+     "idx": 4,
+     "end": "tree"
+    }
+   ],
+   "eligible": [
+    1,
+    2,
+    4
+   ],
+   "weekly": [
+    1,
+    2,
+    3,
+    4
+   ]
+  },
+  {
+   "name": "공격 클립에 남은 실점 표시는 무시",
+   "game": {
+    "kind": "opponent",
+    "attack_end": "building",
+    "clip_tags": {
+     "1": {
+      "conceded": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    }
+   ],
+   "eligible": [
+    1
+   ],
+   "weekly": [
+    1
+   ]
+  },
+  {
+   "name": "태깅 안 된 경기(종류 없음)는 월간 대상이 없다 — 주간은 전부",
+   "game": {
+    "kind": null,
+    "attack_end": "building"
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    },
+    {
+     "idx": 2,
+     "end": "tree"
+    }
+   ],
+   "eligible": [],
+   "weekly": [
+    1,
+    2
+   ]
+  },
+  {
+   "name": "다른 팀인데 골대 정보도 사람 판단도 없으면 월간에서 모두 제외",
+   "game": {
+    "kind": "opponent",
+    "attack_end": null
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": "building"
+    },
+    {
+     "idx": 2,
+     "end": "tree"
+    }
+   ],
+   "eligible": [],
+   "weekly": [
+    1,
+    2
+   ]
+  },
+  {
+   "name": "모든 장면이 잘못 잡힘이면 주간도 월간도 비어 있다",
+   "game": {
+    "kind": "scrimmage",
+    "clip_tags": {
+     "1": {
+      "removed": true
+     },
+     "2": {
+      "removed": true
+     }
+    }
+   },
+   "clips": [
+    {
+     "idx": 1,
+     "end": null
+    },
+    {
+     "idx": 2,
+     "end": null
+    }
+   ],
+   "eligible": [],
+   "weekly": []
+  }
+ ],
+ "nameCases": [
+  {
+   "name": "태깅 전은 날짜-경기번호",
+   "date": "2026-12-06",
+   "label": "1경기",
+   "kind": null,
+   "opponent": "",
+   "title": "2026-12-06-1경기",
+   "file": "2026-12-06-1경기"
+  },
+  {
+   "name": "상대 이름이 붙는다",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": "opponent",
+   "opponent": "OO FC",
+   "title": "2026-12-06-2경기-OO FC",
+   "file": "2026-12-06-2경기-OO FC"
+  },
+  {
+   "name": "종류가 비어도 상대 이름이 있으면 붙는다",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": null,
+   "opponent": " OO FC ",
+   "title": "2026-12-06-2경기-OO FC",
+   "file": "2026-12-06-2경기-OO FC"
+  },
+  {
+   "name": "청백전",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": "scrimmage",
+   "opponent": "",
+   "title": "2026-12-06-2경기-청백전",
+   "file": "2026-12-06-2경기-청백전"
+  },
+  {
+   "name": "한글 '청백전' 값",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": "청백전",
+   "opponent": "",
+   "title": "2026-12-06-2경기-청백전",
+   "file": "2026-12-06-2경기-청백전"
+  },
+  {
+   "name": "청백전이면 상대 이름은 쓰지 않는다",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": "scrimmage",
+   "opponent": "OO FC",
+   "title": "2026-12-06-2경기-청백전",
+   "file": "2026-12-06-2경기-청백전"
+  },
+  {
+   "name": "다른 팀인데 이름이 비면 태깅 전과 같다",
+   "date": "2026-12-06",
+   "label": "2경기",
+   "kind": "opponent",
+   "opponent": "   ",
+   "title": "2026-12-06-2경기",
+   "file": "2026-12-06-2경기"
+  },
+  {
+   "name": "YouTube 제목은 원래 이름 그대로, 파일 이름은 금지 문자를 _로",
+   "date": "2026-12-06",
+   "label": "1경기",
+   "kind": "opponent",
+   "opponent": "A/B:C?",
+   "title": "2026-12-06-1경기-A/B:C?",
+   "file": "2026-12-06-1경기-A_B_C_"
+  },
+  {
+   "name": "제목은 100자, 파일 이름의 상대 이름은 30자",
+   "date": "2026-12-06",
+   "label": "1경기",
+   "kind": "opponent",
+   "opponent": "가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+   "title": "2026-12-06-1경기-가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+   "file": "2026-12-06-1경기-가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가"
+  }
+ ]
+}

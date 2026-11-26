@@ -317,7 +317,6 @@ def generate_description(
     """
     from soccer_highlights import get_merged_timeline
     base_name = video_name.rsplit(".", 1)[0]
-    lines = [f"축구 하이라이트 — {base_name}"]
 
     approved_cands = [candidates[idx] for idx in approved if idx < len(candidates)]
     _, cand_timestamps = get_merged_timeline(approved_cands, pre_sec, post_sec)
@@ -337,9 +336,19 @@ def generate_description(
         ts_orig = f"{int(peak // 60)}:{int(peak % 60):02d}"
         shot_lines.append(f"{ts_hl} 슈팅 #{len(shot_lines) + 1}  (원본 {ts_orig})")
 
+    return format_description(base_name, shot_lines)
+
+
+def description_first_line(name: str) -> str:
+    """설명의 첫 줄 — 영상을 다시 올리지 않고 제목만 고칠 때 이 줄도 같이 바꾼다."""
+    return f"축구 하이라이트 — {name}"
+
+
+def format_description(name: str, shot_lines: list[str]) -> str:
+    """설명 본문: 첫 줄 + (슈팅 장면 목록) + 푸터. generate_description과 러너(publish.py)가 같이 쓴다."""
+    lines = [description_first_line(name)]
     if shot_lines:
         lines += ["", "슈팅 장면", *shot_lines]
-
     lines += [
         "",
         "---",
@@ -426,6 +435,42 @@ def upload_video(
             pass
 
     return yt_url
+
+
+def update_video_snippet(video_id: str, title: str, first_line: str | None = None) -> None:
+    """이미 올린 영상의 제목(과 설명 첫 줄)만 바꾼다 — videos.update(50 units). 영상은 다시 올리지 않는다.
+
+    설명의 나머지(슈팅 장면 목록·푸터)는 그대로 둔다. 영상이 없거나 인증이 죽었으면 RuntimeError.
+    """
+    from googleapiclient.discovery import build  # type: ignore
+
+    creds = _get_credentials()
+    if not creds:
+        raise RuntimeError("YouTube 인증이 필요합니다. /auth/youtube 로 인증하세요.")
+    yt = build("youtube", "v3", credentials=creds)
+
+    from google.auth.exceptions import RefreshError  # type: ignore
+    try:
+        items = yt.videos().list(part="snippet", id=video_id).execute().get("items", [])
+        if not items:
+            raise RuntimeError(f"YouTube에서 영상을 찾지 못했습니다: {video_id}")
+        old = items[0]["snippet"]
+        description = old.get("description", "")
+        if first_line:
+            rest = description.split("\n", 1)[1] if "\n" in description else ""
+            description = first_line + ("\n" + rest if rest else "")
+        # videos.update(part=snippet)는 title·categoryId가 필요하다. 읽기 전용 필드는 보내지 않는다.
+        snippet = {"title": title[:100], "description": description,
+                   "categoryId": old.get("categoryId", "17")}
+        if old.get("tags"):
+            snippet["tags"] = old["tags"]
+        yt.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+    except RefreshError as e:
+        if _is_hard_auth_error(e):
+            revoke()
+            raise RuntimeError(
+                "YouTube 인증이 만료되었거나 취소되었습니다. 다시 로그인해주세요.") from e
+        raise RuntimeError(f"YouTube 토큰 갱신 실패 (일시적 오류일 수 있음): {e}") from e
 
 
 def publish_highlight(

@@ -33,7 +33,7 @@ import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 if __package__ in (None, ""):  # python kaggle_runner/inbox_runner.py 로 직접 실행한 경우
@@ -45,10 +45,21 @@ import soccer_highlights as sh  # noqa: E402
 import youtube_uploader as yt_up  # noqa: E402
 from kaggle_runner import grouping, naming  # noqa: E402
 from kaggle_runner.analysis import analyze_candidates  # noqa: E402
+from kaggle_runner.common import (  # noqa: E402
+    AUTH_HELP,
+    KST,
+    clips_file,
+    day_file,
+    from_iso,
+    games_file,
+    is_auth_error,
+    iso,
+    kst_date,
+)
 from kaggle_runner.notify import Notifier  # noqa: E402
+from kaggle_runner.publish import Publisher  # noqa: E402
 from kaggle_runner.stores import FOLDERS, DriveStore, LocalStore, RemoteFile  # noqa: E402
 
-KST = timezone(timedelta(hours=9), "KST")   # 한국은 서머타임이 없어 고정 오프셋으로 충분
 SECRETS_FILENAME = "hl_secrets.json"
 REQUIRED_SECRETS = ("GEMINI_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
                     "GOOGLE_REFRESH_TOKEN", "ROOT_FOLDER_ID", "NTFY_TOPIC")
@@ -67,6 +78,7 @@ POLL_SEC = 30                     # 다음 파트·새 업로드를 기다릴 �
 LINGER_SEC = 20 * 60              # 인박스가 빈 뒤에도 새 업로드가 더 올지 기다리는 시간(알림은 그 뒤 한 번)
 MAX_RUN_SEC = 10 * 3600           # Kaggle 세션 한도(12시간) 전에 안전하게 멈춘다
 CLAIM_KEEP_DAYS = 60              # 끝난 claims 기록을 이만큼 지나면 정리
+AUTO_PUBLISH_MIN_REVIEW_HOURS = 6  # 자동 게시까지 검토할 시간이 최소 이만큼은 남도록 한다(auto_publish_at)
 QUALITY_MIN_HEIGHT = 1000         # 이보다 낮으면 폰 업로드 중 압축된 것으로 본다(F4)
 QUALITY_MIN_VIDEO_BPS = 4_000_000
 # classify_all_parallel은 후보 하나의 오류를 highlight=False로 삼켜 배치를 살린다. 그래서 전부 실패해도
@@ -87,24 +99,6 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def iso(dt: datetime) -> str:
-    return dt.astimezone(UTC).isoformat(timespec="seconds")
-
-
-def from_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-
-
-def kst_date(dt: datetime) -> str:
-    return dt.astimezone(KST).strftime("%Y-%m-%d")
-
-
 # ─── 설정·비밀값 ─────────────────────────────────────────────────────────────
 @dataclass
 class Settings:
@@ -123,6 +117,10 @@ class Settings:
     max_segments: int | None = None   # 로컬 시험용 — 신호가 센 순으로 N개만 빌드
     once: bool = False                # 기다리지 않고 한 번만 돌고 끝낸다(로컬 시험용)
     hl_clips: bool = False            # 비밀값 HL_CLIPS — 하이라이트 클립을 06_clips에 보관(MONTHLY_PLAN.md Phase 1)
+    # 비밀값 HL_REVIEW — 분석 뒤 YouTube에 바로 올리지 않고 폰에서 태깅·검토한 뒤 게시한다(Phase 2).
+    # 클립 보관이 꼭 필요해 HL_CLIPS와 상관없이 클립을 남기고, 클립 보관에 실패하면 예전처럼 바로 게시한다.
+    hl_review: bool = False
+    review_url: str = ""              # 비밀값 REVIEW_URL — 검토 알림을 누르면 열 검토 페이지 주소(Apps Script 웹 앱)
 
 
 def find_secrets_file(root=Path("/kaggle/input")) -> Path | None:
@@ -174,6 +172,8 @@ def settings_from(secrets: dict, args) -> Settings:
         max_segments=args.max_segments,
         once=args.once,
         hl_clips=truthy(secrets.get("HL_CLIPS")) or args.clips,
+        hl_review=truthy(secrets.get("HL_REVIEW")) or args.review,
+        review_url=str(secrets.get("REVIEW_URL") or "").strip(),
     )
     if args.settle_sec is not None:
         s.settle_sec = args.settle_sec
@@ -264,22 +264,9 @@ def quality_warning(info: MediaInfo) -> str | None:
 
 
 # ─── 날짜별 게시 목록(_state/day_YYYY-MM-DD.json) ───────────────────────────
-def day_file(date_str: str) -> str:
-    return f"day_{date_str}.json"
-
-
 def next_label(day: dict) -> str:
     """그날 처리한 경기 수 + 1 — "하이라이트 없음" 경기도 번호를 차지한다."""
     return f"{len(day.get('games', [])) + 1}경기"
-
-
-# 경기별 클립·태깅 기록(MONTHLY_PLAN.md 3-4). 내부 키는 `{날짜}_{n경기}` 그대로 — 상대팀은 바뀔 수 있어 넣지 않는다.
-def clips_file(date_str: str, label: str) -> str:
-    return f"clips_{date_str}_{label}.json"
-
-
-def games_file(date_str: str, label: str) -> str:
-    return f"games_{date_str}_{label}.json"
 
 
 def _jsonable(data):
@@ -308,27 +295,37 @@ def _clip_cand(c: dict) -> dict:
 
 
 def band_text(day: dict) -> str:
-    """그날 BAND 글. 영상 줄은 `· {날짜}-{n경기}` — YouTube 제목과 같은 경기 이름이다(naming.game_name)."""
-    links = [(naming.game_name(day["date"], g["label"]), g["yt_url"])
+    """그날 BAND 글. 영상 줄은 `· {날짜}-{n경기}[-상대]` — YouTube 제목과 같은 경기 이름이다.
+
+    게시 단계가 최종 이름(상대팀 포함)을 기록에 남기면 그것을, 없으면(분석 때 바로 올린 경기) 날짜-경기번호를 쓴다.
+    """
+    links = [(g.get("name") or naming.game_name(day["date"], g["label"]), g["yt_url"])
              for g in day.get("games", []) if g.get("yt_url")]
     return band_poster.format_post_content(links, match_date=day["date"])
 
 
-# 한 번의 실행 결과를 알림 한 통으로 모으는 이벤트 종류(build_report가 읽는다)
+def auto_publish_at(match_date: str, now: datetime) -> str:
+    """검토가 없을 때 자동 게시하는 시각: 경기 다음 날 09:00 KST(MONTHLY_PLAN.md Q9).
+
+    처리가 늦어 그 시각이 6시간 안이거나 이미 지났으면(밀린 경기를 한꺼번에 올린 경우) 그 뒤의 첫 09:00으로
+    미룬다 — 검토할 틈 없이 바로 올라가 버리지 않게.
+    """
+    at = datetime.strptime(match_date, "%Y-%m-%d").replace(tzinfo=KST) + timedelta(days=1, hours=9)
+    earliest = now.astimezone(KST) + timedelta(hours=AUTO_PUBLISH_MIN_REVIEW_HOURS)
+    while at < earliest:
+        at += timedelta(days=1)
+    return at.isoformat(timespec="seconds")
+
+
+# 한 번의 실행 결과를 알림으로 모으는 이벤트 종류(build_report·build_review_report가 읽는다)
 GAME_KINDS = ("game", "none", "yt_fail")        # 경기 하나를 처리한 결과
-PROBLEM_KINDS = ("none", "yt_fail", "fail", "2d_fail")
+PROBLEM_KINDS = ("none", "yt_fail", "fail", "2d_fail", "pub_fail", "retitle_fail")
+# 검토 대기 경기가 있으면 같은 분석 단계의 확인할 일(※ 줄)은 검토 알림에 같이 싣는다
+ANALYSIS_NOTE_KINDS = ("none", "fail", "2d_ok", "2d_fail")
 
 
-def build_report(events: list[dict], days: dict[str, dict]) -> tuple[str, str, list[str]]:
-    """실행 결과 이벤트 → (제목, 본문, 태그). 본문 앞은 그날 BAND 글 전체(탭하면 복사), 뒤의 ※ 줄은 확인할 일."""
-    published = sum(1 for e in events if e["kind"] == "game")
-    videos = sum(e.get("files", 0) for e in events if e["kind"] in GAME_KINDS + ("fail",))
-    problems = sum(1 for e in events if e["kind"] in PROBLEM_KINDS)
-
-    dates = list(dict.fromkeys(e["date"] for e in events if e["kind"] in GAME_KINDS))
-    posts = [band_text(days[d]) for d in dates
-             if d in days and any(g.get("yt_url") for g in days[d].get("games", []))]
-
+def report_notes(events: list[dict]) -> list[str]:
+    """이벤트 → ※ 줄(확인할 일)."""
     notes: list[str] = []
     for e in events:
         kind, label = e["kind"], e.get("label", "")
@@ -343,19 +340,67 @@ def build_report(events: list[dict], days: dict[str, dict]) -> tuple[str, str, l
         elif kind == "fail":
             notes.append(f"※ 처리 실패 — {e['names']}: {e['reason']}\n"
                          "원본은 HLEditor/04_failed에 있습니다. 01_inbox로 옮기면 다시 처리합니다.")
+        elif kind == "pub_fail":
+            notes.append(f"※ {label}: 게시 실패 — {e['reason']}\n검토 페이지에서 다시 게시할 수 있습니다.")
+        elif kind == "skip":
+            notes.append(f"※ {label}: 모든 장면이 '잘못 잡힘'으로 표시돼 YouTube에 올리지 않았습니다.")
+        elif kind == "retitle_fail":
+            notes.append(f"※ {label}: YouTube 제목을 바꾸지 못했습니다 — {e['reason']}")
         elif kind == "2d_ok":
             notes.append(f"※ {label}: 2D 영상을 Drive HLEditor/05_output에 올렸습니다: {e['link']}")
         elif kind == "2d_fail":
             notes.append(f"※ {label}: 2D 변환 실패 — {e['error']} (하이라이트는 정상 처리됨)")
+    return notes
 
+
+def build_report(events: list[dict], days: dict[str, dict]) -> tuple[str, str, list[str]]:
+    """실행 결과 이벤트 → (제목, 본문, 태그). 본문 앞은 그날 BAND 글 전체(탭하면 복사), 뒤의 ※ 줄은 확인할 일."""
+    published = sum(1 for e in events if e["kind"] == "game")
+    videos = sum(e.get("files", 0) for e in events if e["kind"] in GAME_KINDS + ("fail",))
+    problems = sum(1 for e in events if e["kind"] in PROBLEM_KINDS)
+
+    dates = list(dict.fromkeys(e["date"] for e in events if e["kind"] in GAME_KINDS))
+    posts = [band_text(days[d]) for d in dates
+             if d in days and any(g.get("yt_url") for g in days[d].get("games", []))]
+
+    notes = report_notes(events)
     message = "\n\n".join(posts)
     if notes:
         message += ("\n\n" if message else "") + "\n".join(notes)
 
     head = f"하이라이트 {published}경기 완료" if published else "올라간 하이라이트 없음"
-    title = head + (f" · 확인 필요 {problems}건" if problems else "") + f" (영상 {videos}개 처리)"
+    # 게시 단계(검토 뒤 게시)는 영상을 새로 처리하지 않아 처리 개수가 0이다 — 그땐 괄호를 뺀다
+    count = f" (영상 {videos}개 처리)" if videos else ""
+    title = head + (f" · 확인 필요 {problems}건" if problems else "") + count
     tags = (["soccer"] if published else []) + (["warning"] if problems else [])
     return title, message, tags
+
+
+def _month_day(date_str: str) -> str:
+    _, m, d = date_str.split("-")
+    return f"{int(m)}/{int(d)}"
+
+
+def build_review_report(events: list[dict], review_url: str = "") -> tuple[str, str, list[str], str | None]:
+    """검토 대기 경기 → (제목, 본문, 태그, click). BAND 글 대신 보낸다 — 누르면 검토 페이지가 열린다.
+
+    본문은 경기 목록과 자동 게시 안내, 뒤에 ※ 줄(확인할 일). 날짜가 하나면 그날 검토 화면으로 바로 간다.
+    """
+    pending = [e for e in events if e["kind"] == "pending"]
+    dates = list(dict.fromkeys(e["date"] for e in pending))
+    title = f"{'·'.join(_month_day(d) for d in dates)} 하이라이트 검토 준비 — {len(pending)}경기"
+    lines = [f"· {e['name']} (클립 {e['clips']}개)" for e in pending]
+    auto_at = min(e["auto_at"] for e in pending)
+    lines += ["", f"{_month_day(auto_at[:10])} 오전 {int(auto_at[11:13])}시까지 검토가 없으면 "
+                  "전체 장면으로 자동 게시합니다."]
+    notes = report_notes(events)
+    message = "\n".join(lines) + ("\n\n" + "\n".join(notes) if notes else "")
+    problems = any(e["kind"] in PROBLEM_KINDS for e in events)
+    click = None
+    if review_url:
+        sep = "&" if "?" in review_url else "?"
+        click = f"{review_url}{sep}page=review" + (f"&date={dates[0]}" if len(dates) == 1 else "")
+    return title, message, ["soccer"] + (["warning"] if problems else []), click
 
 
 # ─── 런타임 준비 (Kaggle) ────────────────────────────────────────────────────
@@ -425,21 +470,6 @@ def gpu_available() -> bool:
         return False
 
 
-def is_auth_error(exc: BaseException) -> bool:
-    """Google 자격 증명이 죽은 경우(refresh token 만료·취소)인지."""
-    try:
-        from google.auth.exceptions import RefreshError
-        if isinstance(exc, RefreshError):
-            return True
-    except ImportError:
-        pass
-    return "invalid_grant" in str(exc)
-
-
-AUTH_HELP = ("PC에서 `python tools/make_kaggle_secrets.py`를 다시 실행한 뒤, "
-             "Kaggle 데이터셋 hl-secrets에 새 hl_secrets.json을 새 버전으로 올려 주세요.")
-
-
 # ─── 러너 ────────────────────────────────────────────────────────────────────
 @dataclass
 class LocalPart:
@@ -462,6 +492,7 @@ class InboxRunner:
         self.sleep = sleep
         self.log = log
         self.claims: dict = store.read_json(CLAIMS_FILE) or {}
+        self.publisher = Publisher(self)                # 검토 뒤 게시·제목 변경(requests.json) — publish.py
         self.local: dict[str, LocalPart] = {}
         self.report: list[dict] = []                    # 아직 알리지 않은 결과 — flush_report가 한 통으로 보낸다
         self.last_activity: datetime | None = None      # 마지막으로 영상을 받거나 경기를 끝낸 시각
@@ -478,9 +509,14 @@ class InboxRunner:
         self._save_claims()
 
     # 실행 루프 --------------------------------------------------------------
+    def process_requests(self) -> None:
+        """검토 페이지가 넣은 게시·제목 변경 요청을 처리한다(publish.py). 요청이 없으면 아무 일도 안 한다."""
+        self.publisher.process_requests()
+
     def run(self) -> dict:
         self.recover_processing()
         self.cleanup()
+        self.process_requests()   # 게시 요청은 빨리 나가야 하므로 인박스보다 먼저
         deadline = self.now() + timedelta(seconds=MAX_RUN_SEC)
         while True:
             claimed = self.claim_new()
@@ -494,12 +530,15 @@ class InboxRunner:
             if not waiting and not claimed:
                 if not self._lingering(deadline):
                     break         # 인박스가 비었고 기다리는 경기도 없다
+                self.process_requests()   # 기다리는 동안 들어온 게시 요청도 바로 처리한다
                 self.sleep(POLL_SEC)
                 continue
             if self.s.once or self.now() >= deadline:
                 self.release_waiting()
                 break
+            self.process_requests()
             self.sleep(POLL_SEC)
+        self.process_requests()   # 인박스를 처리하는 동안 들어온 요청
         self.flush_report()
         self.summary["finished_at"] = iso(self.now())
         return self.summary
@@ -536,16 +575,30 @@ class InboxRunner:
         return {"date": date, "games": games} if games else None
 
     def flush_report(self) -> None:
-        """모아 둔 결과를 알림 한 통으로 보낸다 — 올린 영상을 다 처리한 뒤 한 번만."""
+        """모아 둔 결과를 알림으로 보낸다 — 올린 영상을 다 처리한 뒤 한 번만.
+
+        검토 대기(pending) 경기가 있으면 BAND 글 대신 "검토 준비" 알림을 먼저 보낸다(누르면 검토 페이지).
+        그 실행에서 게시를 끝낸 경기가 있으면 BAND 글 알림은 따로 한 통 더 간다 — 그 본문은 복사해서 붙이는 글이라
+        검토 안내와 섞지 않는다.
+        """
         events, self.report = self.report, []
         if not events:
             return
+        rest = [e for e in events if e["kind"] != "pending"]
+        pending = [e for e in events if e["kind"] == "pending"]
+        if pending:
+            carry = [e for e in rest if e["kind"] in ANALYSIS_NOTE_KINDS]
+            rest = [e for e in rest if e not in carry]
+            title, message, tags, click = build_review_report(pending + carry, self.s.review_url)
+            self.notify.send(title, message, tags=tags, click=click)
+        if not rest:
+            return
         days = {}
-        for date in dict.fromkeys(e["date"] for e in events if e["kind"] in GAME_KINDS):
-            day = self._day_for(date, events)
+        for date in dict.fromkeys(e["date"] for e in rest if e["kind"] in GAME_KINDS):
+            day = self._day_for(date, rest)
             if day:
                 days[date] = day
-        title, message, tags = build_report(events, days)
+        title, message, tags = build_report(rest, days)
         self.notify.send(title, message, tags=tags)
 
     def recover_processing(self) -> None:
@@ -706,6 +759,26 @@ class InboxRunner:
                                 copy_mode=bool(quality.get("copy")))
         selected_ids = {id(c) for c in selected}
         approved = [i for i, c in enumerate(cands) if id(c) in selected_ids]
+
+        originals = None
+        if self.s.hl_review:
+            # 검토 모드(Phase 2): YouTube에 바로 올리지 않고 클립을 06_clips에 남긴 채 pending으로 둔다.
+            # 폰에서 태깅하고 "게시"를 누르거나 다음 날 09:00이 되면 게시 단계(publish.py)가 올린다.
+            originals = self._done(parts, file_name, warnings)
+            auto_at = auto_publish_at(match_date, self.now())
+            if self._store_clips(match_date, label, built, originals, quality, warnings,
+                                 pending_auto_at=auto_at):
+                day["games"].append(record)
+                self.store.write_json(day_file(match_date), day)
+                self._record("pending", **game, name=name, clips=len(built.clips), auto_at=auto_at)
+                self.summary["games"].append({"label": label, "date": match_date, "yt_url": None,
+                                              "pending": True})
+                if group.wants_2d:
+                    self._run_2d(video, selected, out_mp4, label, match_date, game_dir)
+                return
+            # 클립이 없으면 검토도 게시 단계도 쓸 수 없다 — 영상을 잃지 않도록 예전처럼 바로 올린다
+            warnings.append("클립 보관에 실패해 검토 없이 바로 게시했습니다.")
+
         yt_url, yt_error = self._publish(out_mp4, video, cands, approved, label, name)
 
         # 아래에서 경고를 더 붙여도(원본 이름 변경·클립 보관) 알림에 실리도록 warnings를 같은 리스트로 둔다
@@ -723,11 +796,12 @@ class InboxRunner:
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
             self._record("yt_fail", **game, error=yt_error, link=link)
-        originals = self._done(parts, file_name, warnings)
+        if originals is None:
+            originals = self._done(parts, file_name, warnings)
         self.summary["games"].append({"label": label, "date": match_date, "yt_url": yt_url,
                                       "error": yt_error})
 
-        if self.s.hl_clips:
+        if self.s.hl_clips and not self.s.hl_review:      # 검토 모드는 위에서 이미 시도했다
             self._store_clips(match_date, label, built, originals, quality, warnings,
                               yt_url=yt_url, yt_title=name, yt_error=yt_error)
         if group.wants_2d:
@@ -798,14 +872,20 @@ class InboxRunner:
 
     # 클립 보관 (MONTHLY_PLAN.md Phase 1) ------------------------------------
     def _store_clips(self, match_date: str, label: str, built, originals: list[dict], quality: dict,
-                     warnings: list[str], *, yt_url: str | None, yt_title: str,
-                     yt_error: str | None) -> None:
-        """하이라이트를 이룬 클립을 06_clips에 올리고 clips_*.json·games_*.json을 남긴다(HL_CLIPS).
+                     warnings: list[str], *, yt_url: str | None = None, yt_title: str | None = None,
+                     yt_error: str | None = None, pending_auto_at: str | None = None) -> bool:
+        """하이라이트를 이룬 클립을 06_clips에 올리고 clips_*.json·games_*.json을 남긴다.
 
-        하이라이트는 이미 게시됐으므로 실패해도 경기 처리를 되돌리지 않는다 — 인증 오류만 위로 올리고,
-        나머지는 `※ {label}: 클립 보관 실패 — …` 경고로 알린다. 클립을 일부만 올리면 번호가 하이라이트 속
-        위치와 어긋나므로 전부 올리거나, 실패하면 올린 것을 지우고 아무것도 남기지 않는다.
+        두 가지 모드:
+          · HL_CLIPS(Phase 1): 이미 게시한 경기의 기록 — games는 auto_published(YouTube 실패면 failed).
+          · HL_REVIEW(Phase 2, pending_auto_at 지정): 게시 전 경기의 기록 — games는 pending이고 pending_auto_at이
+            자동 게시 시각이다. 이 기록이 없으면 검토도 게시도 못 하므로 games 저장 실패도 실패로 본다.
+
+        실패해도 경기 처리를 되돌리지 않는다 — 인증 오류만 위로 올리고, 나머지는
+        `※ {label}: 클립 보관 실패 — …` 경고로 알린다. 클립을 일부만 올리면 번호가 하이라이트 속 위치와
+        어긋나므로 전부 올리거나, 실패하면 올린 것을 지우고 아무것도 남기지 않는다. 성공이면 True.
         """
+        pending = pending_auto_at is not None
         created_at = iso(self.now())
         uploaded: list[RemoteFile] = []
         try:
@@ -819,27 +899,35 @@ class InboxRunner:
             self.log(f"[{label}] 클립 보관 실패: {e!r}")
             self._discard_clips(uploaded)
             warnings.append(f"클립 보관 실패 — {str(e)[:200]}")
-            return
+            return False
         self.log(f"[{label}] 클립 {len(clips)}개를 {FOLDERS['clips']}에 보관 "
                  f"(합계 {sum(c['dur'] for c in clips):.1f}초)")
 
-        # 나중에 태깅하면 제목·월간에 반영되도록 경기 기록을 남긴다. 클립은 이미 보관됐으므로 실패해도 경고만.
-        published = yt_url is not None
-        try:
-            self.store.write_json(games_file(match_date, label), _jsonable({
-                "date": match_date, "label": label,
-                "status": "auto_published" if published else "failed", "auto_at": None,
+        # 태깅·게시 상태. 나중에 태깅하면 제목·월간에 반영된다(MONTHLY_PLAN.md 3-4).
+        game = {"date": match_date, "label": label, "status": "pending", "auto_at": pending_auto_at,
                 "kind": None, "opponent": "", "attack_end": None, "switch_at_idx": None,
-                "clip_tags": {}, "tagged_at": None, "tag_source": "auto",
-                "published_clips": [c["idx"] for c in clips] if published else [],
-                "yt_url": yt_url, "yt_title": yt_title if published else None,
-                "published_at": created_at if published else None,
-                "attempts": 0, "error": None if published else yt_error}))
+                "clip_tags": {}, "tagged_at": None, "tag_source": None,
+                "published_clips": [], "yt_url": None, "yt_title": None,
+                "published_at": None, "attempts": 0, "error": None}
+        if not pending:
+            published = yt_url is not None
+            game.update(status="auto_published" if published else "failed", tag_source="auto",
+                        published_clips=[c["idx"] for c in clips] if published else [],
+                        yt_url=yt_url, yt_title=yt_title if published else None,
+                        published_at=created_at if published else None,
+                        error=None if published else yt_error)
+        try:
+            self.store.write_json(games_file(match_date, label), _jsonable(game))
         except Exception as e:
             if is_auth_error(e):
                 raise
             self.log(f"[{label}] 경기 기록(games) 저장 실패: {e!r}")
+            if pending:                       # 기록 없이 클립만 있으면 쓸 수 없다 — 치우고 바로 게시하도록 알린다
+                self._discard_clips(uploaded)
+                warnings.append(f"경기 기록 저장 실패 — {str(e)[:200]}")
+                return False
             warnings.append(f"경기 기록 저장 실패 — {str(e)[:200]} (클립은 보관됨)")
+        return True
 
     def _upload_clips(self, match_date: str, label: str, built, uploaded: list[RemoteFile]) -> list[dict]:
         """클립을 06_clips에 올리고 clips_*.json의 `clips` 항목을 만든다. 올린 파일은 uploaded에 쌓는다."""
@@ -944,6 +1032,8 @@ def parse_args(argv=None):
     ap.add_argument("--once", action="store_true", help="기다리지 않고 한 번만 확인하고 끝낸다")
     ap.add_argument("--clips", action="store_true",
                     help="HL_CLIPS와 같음 — 하이라이트 클립을 06_clips에 보관하고 clips_*/games_*.json을 남긴다(시험용)")
+    ap.add_argument("--review", action="store_true",
+                    help="HL_REVIEW와 같음 — YouTube에 바로 올리지 않고 pending으로 두었다가 requests.json의 게시 요청을 처리(시험용)")
     ap.add_argument("--workdir", help="임시 작업 폴더(기본: 시스템 임시 폴더/hl_inbox)")
     return ap.parse_args(argv)
 
