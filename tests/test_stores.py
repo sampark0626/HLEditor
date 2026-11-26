@@ -96,6 +96,48 @@ def test_upload_returns_link_and_stores_content(tmp_path):
     assert drive.children(store.folder_id("output")) == ["highlight.mp4"]
 
 
+def test_clip_and_monthly_folders_exist_and_are_created_on_drive():
+    assert FOLDERS["clips"] == "06_clips" and FOLDERS["monthly"] == "07_monthly"
+    drive, store = make_store()                                    # 사용자가 폴더를 만들 필요 없다
+    assert drive.folder_named("06_clips", drive.folder_named("HLEditor", "root")) == store.folder_id("clips")
+    assert store.folder_id("monthly")
+
+
+def test_upload_with_id_returns_link_and_file_id(tmp_path):
+    drive, store = make_store()
+    local = tmp_path / "c.mp4"
+    local.write_bytes(b"clip")
+    link, fid = store.upload_with_id(local, "clips", "2026-12-06-1경기_c001.mp4")
+    assert link == f"https://drive.google.com/file/d/{fid}/view"
+    assert drive.items[fid]["name"] == "2026-12-06-1경기_c001.mp4" and drive.items[fid]["content"] == b"clip"
+    assert drive.items[fid]["parents"] == [store.folder_id("clips")]
+    assert store.upload(local, "clips", "x.mp4").startswith("https://drive.google.com/file/d/")   # 기존 upload는 링크만
+
+
+def test_rename_changes_the_name_in_place_and_keeps_the_id():
+    drive, store = make_store()
+    fid = drive.add("IMG_0042.MOV", store.folder_id("done"), content=b"v")
+    rf = _remote(drive, fid)
+    renamed = store.rename(rf, "done", "2026-12-06-1경기_원본.mov")
+    assert renamed.id == fid and renamed.name == "2026-12-06-1경기_원본.mov" and renamed.size == rf.size
+    assert drive.children(store.folder_id("done")) == ["2026-12-06-1경기_원본.mov"]
+    assert drive.items[fid]["parents"] == [store.folder_id("done")]    # 폴더는 그대로
+
+
+def test_rename_refuses_files_that_are_not_in_the_folder_or_gone():
+    drive, store = make_store()
+    fid = drive.add("a.mp4", store.folder_id("inbox"))
+    with pytest.raises(FileNotFoundError):
+        store.rename(_remote(drive, fid), "done", "b.mp4")          # 다른 폴더에 있다
+    gone = RemoteFile(id="missing", name="x.mp4", size=0, created_utc=datetime.now(UTC))
+    with pytest.raises(FileNotFoundError):
+        store.rename(gone, "done", "b.mp4")                          # 404
+    trashed = drive.add("t.mp4", store.folder_id("done"), trashed=True)
+    with pytest.raises(FileNotFoundError):
+        store.rename(_remote(drive, trashed), "done", "b.mp4")
+    assert drive.items[fid]["name"] == "a.mp4"
+
+
 def test_state_json_create_update_read():
     drive, store = make_store()
     assert store.read_json("claims.json") is None
@@ -127,3 +169,26 @@ def test_local_store_roundtrip(tmp_path):
     assert store.read_json("s.json") == {"k": "값"} and store.read_json("none.json") is None
     store.trash(rf, "processing")
     assert store.list("processing") == [] and (tmp_path / ".trash" / "a.mp4").exists()
+
+
+def test_local_store_clips_folder_upload_with_id_and_rename(tmp_path):
+    store = LocalStore(tmp_path)
+    assert (tmp_path / "06_clips").is_dir() and (tmp_path / "07_monthly").is_dir()
+    src = tmp_path / "c.mp4"
+    src.write_bytes(b"clip")
+    link, fid = store.upload_with_id(src, "clips", "2026-12-06-1경기_c001.mp4")
+    assert fid == "2026-12-06-1경기_c001.mp4" and os.path.exists(link)       # 로컬 저장소의 id는 파일명
+    assert store.upload(src, "clips", "d.mp4") == str(tmp_path / "06_clips" / "d.mp4")
+
+    (tmp_path / "03_done" / "IMG.MOV").write_bytes(b"video")
+    [rf] = store.list("done")
+    renamed = store.rename(rf, "done", "2026-12-06-1경기_원본.mov")
+    assert (renamed.id, renamed.name, renamed.size) == ("2026-12-06-1경기_원본.mov",) * 2 + (5,)
+    assert [f.name for f in store.list("done")] == ["2026-12-06-1경기_원본.mov"]
+    with pytest.raises(FileNotFoundError):
+        store.rename(rf, "done", "z.mov")                                        # 옛 이름은 이미 없다
+    (tmp_path / "03_done" / "other.mp4").write_bytes(b"x")
+    other = next(f for f in store.list("done") if f.name == "other.mp4")
+    with pytest.raises(FileExistsError):
+        store.rename(other, "done", "2026-12-06-1경기_원본.mov")                  # 덮어쓰지 않는다
+    assert (tmp_path / "03_done" / "other.mp4").exists()

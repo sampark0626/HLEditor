@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from kaggle_runner.notify import Notifier
 from kaggle_runner.stores import FOLDERS, LocalStore
 
 T0 = datetime(2026, 9, 27, 3, 0, tzinfo=UTC)      # 2026-09-27(일) 12:00 KST 녹화 시작
+CLIP_DUR = 13.02                                   # 가짜 클립의 ffprobe 길이(PRE 8 + POST 5초에 가깝게)
 
 
 class Clock:
@@ -49,6 +51,7 @@ class Harness:
         self.gpu = gpu
         self.infos = {}
         self.notes = []
+        self.logs = []
         self.published = []
         self.built = []
         self.publish_error = None
@@ -81,12 +84,14 @@ class Harness:
     def run(self):
         runner = ir.InboxRunner(self.store, self.notifier, self.settings, workdir=self.workdir,
                                 gpu=self.gpu, now=self.clock.now, sleep=self.clock.sleep,
-                                log=lambda m: None)
+                                log=self.logs.append)
         self.runner = runner
         return runner.run()
 
     # 가짜 단계 -----------------------------------------------------------------
     def _probe(self, path):
+        if re.fullmatch(r"clip\d{3}\.mp4", Path(path).name):      # build_output이 만든 클립
+            return ir.MediaInfo(duration=CLIP_DUR)
         return next(info for name, info in self.infos.items() if Path(path).name.endswith(name))
 
     def _analyze(self, video, workdir, cands, gemini_key=None, log=print):
@@ -104,12 +109,20 @@ class Harness:
             raise RuntimeError("ffmpeg 실패(시험)")
         Path(out).write_bytes(b"mp4")
         self.built.append({"video": str(video), "n": len(selected), "title": kw.get("title")})
+        merged, _ = ir.sh.get_merged_timeline(selected, ir.sh.PRE_SEC, ir.sh.POST_SEC)
+        clips = []
+        for i, _m in enumerate(merged):                           # 진짜 build_output처럼 클립 파일을 남긴다
+            path = Path(workdir) / f"clip{i:03d}.mp4"
+            path.write_bytes(f"clip{i}".encode())
+            clips.append(path)
+        return ir.sh.BuildResult(clips=clips, merged=merged)
 
-    def _publish(self, output, source, cands, approved, label, title, **kw):
+    def _publish(self, output, source, cands, approved, video_name, title, **kw):
         if self.publish_error:
             raise RuntimeError(self.publish_error)
-        self.published.append({"label": label, "title": title, "approved": approved,
-                               "privacy": kw.get("privacy")})
+        label = video_name.rsplit("-", 1)[-1]                     # "2026-09-27-1경기" → "1경기"
+        self.published.append({"label": label, "video_name": video_name, "title": title,
+                               "approved": approved, "privacy": kw.get("privacy")})
         return f"https://youtu.be/{label}"
 
     def _post(self, url, data, headers, timeout):
@@ -129,11 +142,13 @@ def test_split_game_and_single_game_are_processed_in_recording_order(h):
     summary = h.run()
 
     assert [p["label"] for p in h.published] == ["1경기", "2경기"]
-    assert h.published[0]["title"] == "한울타리 FC 경기영상 | 1경기 | 2026-09-27"
+    assert h.published[0]["title"] == "2026-09-27-1경기"        # YouTube 제목 = 경기 이름(날짜-경기번호)
+    assert h.published[0]["video_name"] == "2026-09-27-1경기"   # 설명 첫 줄에 쓰이는 이름도 같다
     assert h.published[0]["approved"] == [0, 1]
     assert "merged.mp4" in h.built[0]["video"]                 # 1경기는 두 파트를 합친 영상
-    assert h.built[0]["title"] == "한울타리 FC 경기영상"        # 워터마크
-    assert h.files("done") == ["g2.mp4", "p1.mp4", "p2.mp4"]
+    assert h.built[0]["title"] == "한울타리 FC 경기영상"        # 워터마크는 그대로
+    assert h.files("done") == ["2026-09-27-1경기_원본1.mp4", "2026-09-27-1경기_원본2.mp4",
+                               "2026-09-27-2경기_원본.mp4"]   # 원본 이름이 경기 이름으로(나뉜 파일은 1·2)
     assert h.files("inbox") == [] and h.files("processing") == []
 
     assert len(h.notes) == 1                                    # 경기마다가 아니라 한 통
@@ -142,6 +157,8 @@ def test_split_game_and_single_game_are_processed_in_recording_order(h):
     msg = note["message"]                                       # 그날 BAND 글 전체
     assert "2026년 09월 27일" in msg
     assert "https://youtu.be/1경기" in msg and "https://youtu.be/2경기" in msg
+    assert "· 2026-09-27-1경기\nhttps://youtu.be/1경기" in msg      # BAND 글 줄도 같은 이름
+    assert "· 2026-09-27-2경기\nhttps://youtu.be/2경기" in msg
     assert "※ 1경기: 나뉜 파일 2개를 한 경기로 합쳤습니다" in msg
     assert "click" not in note                                  # 탭하면 복사되도록
 
@@ -149,7 +166,8 @@ def test_split_game_and_single_game_are_processed_in_recording_order(h):
     assert [g["label"] for g in day["games"]] == ["1경기", "2경기"]
     assert day["games"][0]["sources"] == ["p1.mp4", "p2.mp4"]
     assert h.store.read_json("results_2026-09-27_1경기.json")["candidates"]
-    assert h.store.read_json("claims.json")["p1.mp4"]["status"] == "done"
+    claim = h.store.read_json("claims.json")["2026-09-27-1경기_원본1.mp4"]   # 로컬 저장소는 id가 파일명이라 키도 따라간다
+    assert claim["status"] == "done" and claim["renamed_from"] == "p1.mp4"
     assert len(summary["games"]) == 2 and summary["failed"] == []
 
 
@@ -188,7 +206,7 @@ def test_no_highlights_still_takes_a_game_number(h):
     h.run()
     assert h.notes[0]["title"] == "올라간 하이라이트 없음 · 확인 필요 1건 (영상 1개 처리)"
     assert "※ 1경기: 하이라이트 없음" in h.notes[0]["message"]
-    assert h.files("done") == ["quiet.mp4"] and h.published == []
+    assert h.files("done") == ["2026-09-27-1경기_원본.mp4"] and h.published == []   # 하이라이트 없는 경기도 이름 변경
     assert h.store.read_json("day_2026-09-27.json")["games"][0]["yt_url"] is None
 
 
@@ -230,7 +248,7 @@ def test_judge_errors_ignored_when_vision_was_not_used(tmp_path, monkeypatch):
     monkeypatch.setattr(ir, "analyze_candidates", no_vision)
     h.add("g.mp4", 1500, start_min=0)
     h.run()
-    assert h.files("failed") == [] and h.files("done") == ["g.mp4"]
+    assert h.files("failed") == [] and h.files("done") == ["2026-09-27-1경기_원본.mp4"]
 
 
 def test_youtube_failure_backs_up_to_drive_and_says_how_to_fix_auth(h):
@@ -241,9 +259,9 @@ def test_youtube_failure_backs_up_to_drive_and_says_how_to_fix_auth(h):
     assert note["title"] == "올라간 하이라이트 없음 · 확인 필요 1건 (영상 1개 처리)"
     assert "※ 1경기: YouTube 업로드 실패" in note["message"]
     assert "make_kaggle_secrets.py" in note["message"]
-    assert "highlight_2026-09-27_1경기.mp4" in note["message"]   # Drive 백업 링크(click 대신 본문에)
-    assert h.files("output") == ["highlight_2026-09-27_1경기.mp4"]
-    assert h.files("done") == ["g.mp4"]
+    assert "2026-09-27-1경기.mp4" in note["message"]             # Drive 백업 링크(click 대신 본문에)
+    assert h.files("output") == ["2026-09-27-1경기.mp4"]          # 백업 이름 = 경기 이름
+    assert h.files("done") == ["2026-09-27-1경기_원본.mp4"]
 
 
 def test_processing_error_fails_that_game_and_continues(h):
@@ -251,7 +269,7 @@ def test_processing_error_fails_that_game_and_continues(h):
     h.add("bad.mp4", 1500, start_min=0)
     h.add("good.mp4", 1500, start_min=60)
     summary = h.run()
-    assert h.files("failed") == ["bad.mp4"] and h.files("done") == ["good.mp4"]
+    assert h.files("failed") == ["bad.mp4"] and h.files("done") == ["2026-09-27-1경기_원본.mp4"]
     assert "ffmpeg 실패" in summary["failed"][0]["reason"]
     assert [p["label"] for p in h.published] == ["1경기"]      # 실패한 경기는 번호를 쓰지 않음
     assert len(h.notes) == 1                                    # 성공과 실패가 한 통에 같이 온다
@@ -306,8 +324,8 @@ def test_user_retry_from_failed_folder_starts_fresh(h):
     h.store.write_json("claims.json", {"retry.mp4": {"source": "inbox", "status": "failed",
                                                      "attempts": ir.MAX_ATTEMPTS}})
     h.run()
-    assert h.files("done") == ["retry.mp4"]
-    assert h.store.read_json("claims.json")["retry.mp4"]["attempts"] == 1
+    assert h.files("done") == ["2026-09-27-1경기_원본.mp4"]
+    assert h.store.read_json("claims.json")["2026-09-27-1경기_원본.mp4"]["attempts"] == 1
 
 
 def test_old_done_originals_go_to_trash(h):
@@ -339,7 +357,7 @@ def test_gpu_run_processes_2d_request_and_runs_2d(tmp_path, monkeypatch):
     h.add("two_d.mp4", 1500, start_min=0, folder="inbox_2d")
     h.add("plain.mp4", 1500, start_min=60)
     h.run()
-    assert h.files("done") == ["plain.mp4", "two_d.mp4"]
+    assert h.files("done") == ["2026-09-27-1경기_원본.mp4", "2026-09-27-2경기_원본.mp4"]
     assert calls == ["1경기"]                                     # 2D 요청 경기만
 
 
@@ -352,7 +370,7 @@ def test_2d_failure_only_notifies(tmp_path, monkeypatch):
     assert [n["title"] for n in h.notes] == ["하이라이트 1경기 완료 · 확인 필요 1건 (영상 1개 처리)"]
     assert "https://youtu.be/1경기" in h.notes[0]["message"]
     assert "※ 1경기: 2D 변환 실패 — pip 실패" in h.notes[0]["message"]
-    assert h.files("done") == ["two_d.mp4"]
+    assert h.files("done") == ["2026-09-27-1경기_원본.mp4"]
 
 
 def test_dry_run_keeps_output_locally_and_skips_youtube(tmp_path, monkeypatch):
@@ -360,7 +378,7 @@ def test_dry_run_keeps_output_locally_and_skips_youtube(tmp_path, monkeypatch):
     h.add("g.mp4", 1500, start_min=0)
     h.run()
     assert h.published == []
-    assert h.files("output") == ["highlight_2026-09-27_1경기.mp4"]
+    assert h.files("output") == ["2026-09-27-1경기.mp4"]
     assert "https://youtu.be/DRYRUN-1경기" in h.notes[0]["message"]
 
 
@@ -369,6 +387,205 @@ def test_max_segments_keeps_strongest(tmp_path, monkeypatch):
     h.add("g.mp4", 1500, start_min=0)
     h.run()
     assert h.built[0]["n"] == 1 and h.published[0]["approved"] == [0]   # delta_db 12 쪽
+
+
+# ─── 클립 보관·이름 규칙 (MONTHLY_PLAN.md Phase 1) ───────────────────────────
+ORIGINAL_1 = "2026-09-27-1경기_원본.mp4"
+
+
+def test_names_apply_even_when_clip_storage_is_off(h):
+    """HL_CLIPS가 꺼져 있어도 이름 규칙은 적용되고, 클립·JSON은 아무것도 남기지 않는다."""
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.published[0]["title"] == "2026-09-27-1경기"
+    assert h.files("done") == [ORIGINAL_1]
+    assert h.files("clips") == []
+    assert h.store.read_json("clips_2026-09-27_1경기.json") is None
+    assert h.store.read_json("games_2026-09-27_1경기.json") is None
+
+
+def test_clips_and_json_are_stored_when_enabled(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+
+    names = ["2026-09-27-1경기_c001.mp4", "2026-09-27-1경기_c002.mp4"]
+    assert h.files("clips") == names
+    assert (h.root / "06_clips" / names[0]).read_bytes() == b"clip0"
+    doc = h.store.read_json("clips_2026-09-27_1경기.json")
+    assert (doc["date"], doc["label"]) == ("2026-09-27", "1경기") and doc["created_at"]
+    assert doc["encode"] == {"preset": "fast", "crf": 25, "height": 1080}      # 기본 품질 balanced
+    assert doc["originals"] == [{"file_id": ORIGINAL_1, "name": ORIGINAL_1}]
+    c1, c2 = doc["clips"]
+    assert (c1["idx"], c1["name"], c1["file_id"]) == (1, names[0], names[0])
+    assert (c1["src_start"], c1["src_end"], c1["dur"], c1["end"]) == (92.0, 105.0, CLIP_DUR, None)
+    assert c1["cands"] == [{"peak": 100.0, "type": "goal", "confidence": 0.9, "delta_db": 12.0, "pan": None}]
+    assert (c2["idx"], c2["src_start"], c2["src_end"]) == (2, 392.0, 405.0)
+
+    game = h.store.read_json("games_2026-09-27_1경기.json")
+    assert (game["status"], game["tag_source"]) == ("auto_published", "auto")
+    assert game["published_clips"] == [1, 2]                                    # 자동 게시 = 전체
+    assert (game["yt_url"], game["yt_title"]) == ("https://youtu.be/1경기", "2026-09-27-1경기")
+    assert (game["kind"], game["opponent"], game["attack_end"], game["switch_at_idx"]) == (None, "", None, None)
+    assert game["clip_tags"] == {} and game["tagged_at"] is None and game["error"] is None
+    assert game["published_at"] and game["attempts"] == 0
+    assert len(h.notes) == 1 and "클립 보관" not in h.notes[0]["message"]      # 성공은 조용히
+    assert not list(h.workdir.glob("game_*"))                                   # 작업 폴더 정리는 그대로
+
+
+def test_each_game_gets_its_own_clip_numbers(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    h.add("g1.mp4", 1500, start_min=0)
+    h.add("g2.mp4", 1500, start_min=60)
+    h.run()
+    assert len(h.files("clips")) == 4
+    assert h.files("clips")[2] == "2026-09-27-2경기_c001.mp4"
+    assert h.store.read_json("clips_2026-09-27_2경기.json")["originals"][0]["name"] == "2026-09-27-2경기_원본.mp4"
+
+
+def test_clips_are_kept_even_when_youtube_upload_fails(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    h.publish_error = "quota exceeded"
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert len(h.files("clips")) == 2 and h.store.read_json("clips_2026-09-27_1경기.json")
+    game = h.store.read_json("games_2026-09-27_1경기.json")
+    assert (game["status"], game["published_clips"]) == ("failed", [])
+    assert (game["yt_url"], game["yt_title"], game["published_at"]) == (None, None, None)
+    assert game["error"] == "quota exceeded"
+    assert h.files("output") == ["2026-09-27-1경기.mp4"]                        # 백업은 그대로
+
+
+def test_game_without_highlights_stores_nothing(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    h.verdict = lambda c: {"highlight": False, "confidence": 0.2, "type": "other"}
+    h.add("quiet.mp4", 1500, start_min=0)
+    h.run()
+    assert h.files("clips") == [] and h.store.read_json("clips_2026-09-27_1경기.json") is None
+    assert h.store.read_json("games_2026-09-27_1경기.json") is None
+    assert h.files("done") == [ORIGINAL_1]                                      # 이름은 바뀐다
+
+
+def test_clip_upload_failure_is_only_a_warning_and_leaves_nothing(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    real, calls = h.store.upload_with_id, []
+
+    def flaky(path, key, name):
+        calls.append(name)
+        if len(calls) == 2:
+            raise OSError("boom")
+        return real(path, key, name)
+
+    h.store.upload_with_id = flaky
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+
+    assert [p["label"] for p in h.published] == ["1경기"]                        # 게시는 이미 끝났다
+    assert h.files("clips") == []                                               # 올라간 첫 클립도 치웠다(일부만 두지 않음)
+    assert (h.root / ".trash" / "2026-09-27-1경기_c001.mp4").exists()
+    assert h.store.read_json("clips_2026-09-27_1경기.json") is None
+    assert h.store.read_json("games_2026-09-27_1경기.json") is None
+    assert h.files("done") == [ORIGINAL_1]
+    note = h.notes[0]
+    assert note["title"] == "하이라이트 1경기 완료 (영상 1개 처리)"              # 경고일 뿐 확인 필요 건수는 아니다
+    assert "※ 1경기: 클립 보관 실패 — boom" in note["message"]
+    assert "https://youtu.be/1경기" in note["message"]
+
+
+def test_games_json_failure_keeps_clips_and_warns(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+    real = h.store.write_json
+
+    def write_json(name, data):
+        if name.startswith("games_"):
+            raise OSError("state down")
+        return real(name, data)
+
+    h.store.write_json = write_json
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert len(h.files("clips")) == 2 and h.store.read_json("clips_2026-09-27_1경기.json")
+    assert "※ 1경기: 경기 기록 저장 실패 — state down (클립은 보관됨)" in h.notes[0]["message"]
+
+
+def test_auth_error_while_storing_clips_propagates_but_the_game_is_already_finished(tmp_path, monkeypatch):
+    from google.auth.exceptions import RefreshError
+    h = Harness(tmp_path, monkeypatch, hl_clips=True)
+
+    def dead(*args):
+        raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    h.store.upload_with_id = dead
+    h.add("g.mp4", 1500, start_min=0)
+    with pytest.raises(RefreshError):
+        h.run()
+    # 다시 처리해 YouTube에 두 번 올리지 않도록 원본은 이미 03_done에, 경기는 day 기록에 있다
+    assert h.files("done") == [ORIGINAL_1] and h.files("processing") == []
+    assert h.store.read_json("day_2026-09-27.json")["games"][0]["yt_url"] == "https://youtu.be/1경기"
+    h.runner.flush_report()                                                     # main()이 오류 알림 전에 하는 일
+    assert "https://youtu.be/1경기" in h.notes[0]["message"]
+
+
+def test_original_rename_failure_is_only_a_warning(h):
+    (h.root / "03_done" / ORIGINAL_1).write_bytes(b"x")                         # 같은 이름이 이미 있다
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert h.files("done") == [ORIGINAL_1, "g.mp4"]                             # 못 바꿔도 03_done에는 들어간다
+    assert [p["label"] for p in h.published] == ["1경기"]
+    assert "※ 1경기: 원본 이름을 바꾸지 못했습니다(g.mp4)" in h.notes[0]["message"]
+    assert h.store.read_json("claims.json")["g.mp4"]["status"] == "done"
+
+
+def test_done_renames_a_drive_original_keeping_its_id(tmp_path):
+    from fake_drive import FOLDER, FakeDrive, FakeSession
+
+    from kaggle_runner.stores import DriveStore, RemoteFile
+
+    drive = FakeDrive()
+    root = drive.add("HLEditor", "root", mime=FOLDER)
+    store = DriveStore(None, root, service=drive, session=FakeSession(drive))
+    fid = drive.add("IMG_0042.MOV", store.folder_id("processing"), content=b"v")
+    rf = RemoteFile(id=fid, name="IMG_0042.MOV", size=1, created_utc=T0)
+    runner = ir.InboxRunner(store, Notifier("t", dry_run=True, log=lambda m: None),
+                            ir.Settings(gemini_key=None, default_title="t"), workdir=tmp_path,
+                            now=lambda: T0, sleep=lambda s: None, log=lambda m: None)
+    warnings = []
+    originals = runner._done([SimpleNamespace(remote=rf)], "2026-09-27-1경기", warnings)
+    assert drive.children(store.folder_id("done")) == ["2026-09-27-1경기_원본.mov"]   # 확장자는 원본 것 그대로
+    assert originals == [{"file_id": fid, "name": "2026-09-27-1경기_원본.mov"}] and warnings == []
+    assert runner.claims[fid]["status"] == "done" and runner.claims[fid]["name"] == "2026-09-27-1경기_원본.mov"
+
+
+def test_dry_run_logs_the_youtube_title(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, dry_run=True)
+    h.add("g.mp4", 1500, start_min=0)
+    h.run()
+    assert "[1경기] (dry-run) YouTube 제목: 2026-09-27-1경기" in h.logs
+
+
+def test_clip_cand_keeps_only_what_the_clips_json_needs():
+    cand = {"peak": 100.123, "type": "shot", "confidence": 0.8123, "delta_db": 10.3456, "reason": "긴 설명",
+            "pan": {"pos": -0.59, "speed": 1.4, "speed_max": 8.9, "state": "goal_end_dwell"}, "pan_bonus": 0.1}
+    assert ir._clip_cand(cand) == {"peak": 100.12, "type": "shot", "confidence": 0.812, "delta_db": 10.35,
+                                   "pan": {"pos": -0.59, "state": "goal_end_dwell"}}
+    assert ir._clip_cand({"peak": 5.0}) == {"peak": 5.0, "type": None, "confidence": None,
+                                            "delta_db": None, "pan": None}    # --no-vision
+
+
+def test_encode_info_matches_what_build_output_uses():
+    assert ir._encode_info(ir.sh.QUALITY_PRESETS["quality"]) == {"preset": "medium", "crf": 23, "height": 1080}
+    assert ir._encode_info({}) == {"preset": ir.sh.ENCODE_PRESET, "crf": ir.sh.ENCODE_CRF,
+                                   "height": ir.sh.MAX_HEIGHT}
+    assert ir._encode_info(ir.sh.QUALITY_PRESETS["copy"])["copy"] is True
+
+
+def test_hl_clips_setting_comes_from_secret_or_cli_flag():
+    assert ir.settings_from({}, ir.parse_args([])).hl_clips is False            # 기본 끔
+    for on in ("1", 1, "true", "TRUE", "yes", "on"):
+        assert ir.settings_from({"HL_CLIPS": on}, ir.parse_args([])).hl_clips is True
+    for off in ("0", "", "false", "no", None, "maybe"):
+        assert ir.settings_from({"HL_CLIPS": off}, ir.parse_args([])).hl_clips is False
+    assert ir.settings_from({}, ir.parse_args(["--clips"])).hl_clips is True    # 로컬 시험용 스위치
 
 
 # ─── 알림은 올린 영상을 다 처리한 뒤 한 통만 ────────────────────────────────
@@ -385,7 +602,8 @@ def test_trickling_uploads_give_one_notification_at_the_end(h):
     note = h.notes[0]
     assert note["title"] == "하이라이트 3경기 완료 (영상 3개 처리)"
     assert all(f"https://youtu.be/{n}경기" in note["message"] for n in (1, 2, 3))
-    assert h.files("done") == ["g1.mp4", "g2.mp4", "g3.mp4"] and h.files("inbox") == []
+    assert h.files("done") == [f"2026-09-27-{n}경기_원본.mp4" for n in (1, 2, 3)]
+    assert h.files("inbox") == []
     # 마지막 경기를 끝낸 뒤 LINGER만큼 더 기다렸다가 알린다
     assert h.clock.now() - start >= timedelta(minutes=10 + 3 + 15) + timedelta(seconds=ir.LINGER_SEC)
 
@@ -519,7 +737,8 @@ def test_band_text_lists_only_uploaded_games():
         {"label": "3경기", "yt_url": "https://youtu.be/c"}]}
     text = ir.band_text(day)
     assert text.startswith("2026년 09월 27일 경기 하이라이트 영상입니다.")
-    assert "· 1경기\nhttps://youtu.be/a" in text and "2경기" not in text
+    assert "· 2026-09-27-1경기\nhttps://youtu.be/a" in text and "2026-09-27-2경기" not in text
+    assert "· 2026-09-27-3경기\nhttps://youtu.be/c" in text
     assert ir.next_label(day) == "4경기"
 
 

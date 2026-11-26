@@ -23,6 +23,8 @@ FOLDERS = {
     "done": "03_done",
     "failed": "04_failed",
     "output": "05_output",
+    "clips": "06_clips",         # 경기별 하이라이트 클립 보관(MONTHLY_PLAN.md 3-8). 월간 영상의 재료
+    "monthly": "07_monthly",     # 월간 영상 영구 보관(Phase 3에서 쓴다)
     "state": "_state",
 }
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi"}
@@ -96,9 +98,24 @@ class LocalStore:
         raise FileNotFoundError(f"로컬 저장소에 파일 없음: {f.id}")
 
     def upload(self, local_path, key: str, name: str) -> str:
+        return self.upload_with_id(local_path, key, name)[0]
+
+    def upload_with_id(self, local_path, key: str, name: str) -> tuple[str, str]:
+        """올리고 (링크, 파일 id)를 돌려준다. 로컬 저장소의 파일 id는 파일명이다."""
         dest = self._dir(key) / name
         shutil.copyfile(local_path, dest)
-        return str(dest)
+        return str(dest), name
+
+    def rename(self, f: RemoteFile, key: str, new_name: str) -> RemoteFile:
+        """key 폴더 안의 파일 이름을 바꾼다. 로컬 저장소는 id가 파일명이라 새 id의 RemoteFile을 돌려준다."""
+        path = self._dir(key) / f.id
+        if not path.exists():
+            raise FileNotFoundError(f"로컬 저장소({FOLDERS[key]})에 파일 없음: {f.id}")
+        target = self._dir(key) / new_name
+        if target.exists():
+            raise FileExistsError(f"같은 이름이 이미 있음: {new_name}")
+        path.rename(target)
+        return RemoteFile(id=new_name, name=new_name, size=f.size, created_utc=f.created_utc, md5=f.md5)
 
     def trash(self, f: RemoteFile, key: str) -> None:
         trash_dir = self.root / ".trash"
@@ -204,6 +221,24 @@ class DriveStore:
     def trash(self, f: RemoteFile, key: str) -> None:
         self._svc.files().update(fileId=f.id, body={"trashed": True}).execute(num_retries=3)
 
+    def rename(self, f: RemoteFile, key: str, new_name: str) -> RemoteFile:
+        """key 폴더 안의 파일 이름을 바꾼다. Drive는 id가 그대로라 이름만 바뀐 RemoteFile을 돌려준다.
+
+        다른 폴더로 옮겨졌거나 휴지통에 있으면 FileNotFoundError(move와 같은 기준).
+        """
+        from googleapiclient.errors import HttpError
+        try:
+            meta = self._svc.files().get(fileId=f.id, fields="parents, trashed").execute(num_retries=3)
+        except HttpError as e:
+            if getattr(e.resp, "status", None) == 404:
+                raise FileNotFoundError(f"Drive에 파일 없음: {f.id}") from e
+            raise
+        if meta.get("trashed") or self._ids[key] not in (meta.get("parents") or []):
+            raise FileNotFoundError(f"{FOLDERS[key]}에 파일 없음: {f.name}")
+        self._svc.files().update(fileId=f.id, body={"name": new_name},
+                                 fields="id, name").execute(num_retries=3)
+        return RemoteFile(id=f.id, name=new_name, size=f.size, created_utc=f.created_utc, md5=f.md5)
+
     # 내려받기·올리기 --------------------------------------------------------
     def download(self, f: RemoteFile, dest) -> Path:
         """스트리밍으로 받는다. 끊기면 Range로 이어받고, 크기·md5를 검증한다."""
@@ -237,6 +272,10 @@ class DriveStore:
 
     def upload(self, local_path, key: str, name: str) -> str:
         """이어올리기(resumable)로 올리고 Drive 보기 링크를 돌려준다."""
+        return self.upload_with_id(local_path, key, name)[0]
+
+    def upload_with_id(self, local_path, key: str, name: str) -> tuple[str, str]:
+        """upload와 같되 (보기 링크, 파일 id)를 돌려준다 — 파일 id를 JSON에 적어 둘 때 쓴다."""
         from googleapiclient.http import MediaFileUpload
         mime = "video/mp4" if str(name).lower().endswith(".mp4") else "application/octet-stream"
         media = MediaFileUpload(str(local_path), mimetype=mime, resumable=True, chunksize=32 << 20)
@@ -245,7 +284,8 @@ class DriveStore:
         resp = None
         while resp is None:
             _, resp = req.next_chunk(num_retries=5)
-        return resp.get("webViewLink") or f"https://drive.google.com/file/d/{resp['id']}/view"
+        link = resp.get("webViewLink") or f"https://drive.google.com/file/d/{resp['id']}/view"
+        return link, resp["id"]
 
     # _state JSON -----------------------------------------------------------
     def _find_state(self, name: str) -> str | None:

@@ -5,7 +5,9 @@ HLEditor 인박스 러너 — 폰에서 Drive에 올린 경기 영상을 Kaggle�
 흐름 (MOBILE_PLAN.md 3-2):
   01_inbox의 영상을 가져와(claim) 경기 단위로 묶고(30분 분할 파트 병합)
   → 오디오 후보 → [팬 분석 ∥ Gemini 판별] → 채택 → 빌드(워터마크) → YouTube 업로드
-  → 원본은 03_done. 알림은 경기마다 보내지 않고 모아 둔다.
+  → 원본은 03_done(이름은 `날짜-n경기_원본.mp4`). 알림은 경기마다 보내지 않고 모아 둔다.
+  YouTube 제목·BAND 글 줄·파일 이름은 `날짜-경기번호`(naming.py). HL_CLIPS를 켜면 하이라이트를 이룬
+  클립을 06_clips에 남기고 _state에 clips_*·games_*.json을 만든다(MONTHLY_PLAN.md Phase 1).
   인박스가 빈 뒤에도 LINGER 동안 새 업로드를 더 기다렸다가, 끝나면 ntfy 알림 한 통
   (그날 BAND 글 전체 + 확인할 일, 탭하면 복사)을 보낸다.
   2D 요청(01_inbox_2d)은 GPU 실행에서만 처리하고 결과는 Drive 05_output에 올린다.
@@ -13,7 +15,7 @@ HLEditor 인박스 러너 — 폰에서 Drive에 올린 경기 영상을 Kaggle�
 실행:
   Kaggle — Apps Script가 kernel_bootstrap.py를 push하면 main([])이 불린다.
            비밀값은 비공개 데이터셋의 /kaggle/input/**/hl_secrets.json 에서 읽는다.
-  PC 로컬 시험 — python -m kaggle_runner.inbox_runner --local-inbox DIR --dry-run [--no-vision]
+  PC 로컬 시험 — python -m kaggle_runner.inbox_runner --local-inbox DIR --dry-run [--no-vision] [--clips]
            DIR 아래 01_inbox 등 폴더가 만들어진다. 영상을 01_inbox에 넣고 실행한다.
 """
 
@@ -41,10 +43,10 @@ import band_poster  # noqa: E402
 import config  # noqa: E402
 import soccer_highlights as sh  # noqa: E402
 import youtube_uploader as yt_up  # noqa: E402
-from kaggle_runner import grouping  # noqa: E402
+from kaggle_runner import grouping, naming  # noqa: E402
 from kaggle_runner.analysis import analyze_candidates  # noqa: E402
 from kaggle_runner.notify import Notifier  # noqa: E402
-from kaggle_runner.stores import DriveStore, LocalStore, RemoteFile  # noqa: E402
+from kaggle_runner.stores import FOLDERS, DriveStore, LocalStore, RemoteFile  # noqa: E402
 
 KST = timezone(timedelta(hours=9), "KST")   # 한국은 서머타임이 없어 고정 오프셋으로 충분
 SECRETS_FILENAME = "hl_secrets.json"
@@ -120,6 +122,7 @@ class Settings:
     no_vision: bool = False
     max_segments: int | None = None   # 로컬 시험용 — 신호가 센 순으로 N개만 빌드
     once: bool = False                # 기다리지 않고 한 번만 돌고 끝낸다(로컬 시험용)
+    hl_clips: bool = False            # 비밀값 HL_CLIPS — 하이라이트 클립을 06_clips에 보관(MONTHLY_PLAN.md Phase 1)
 
 
 def find_secrets_file(root=Path("/kaggle/input")) -> Path | None:
@@ -141,6 +144,11 @@ def load_secrets(path) -> dict:
 def mask(value: str | None) -> str:
     """로그에 비밀값을 남기지 않는다 — 앞 4글자만."""
     return f"{value[:4]}…" if value else "(없음)"
+
+
+def truthy(value) -> bool:
+    """비밀값 JSON의 켜기/끄기 — `"1"`, `1`, `true`, `"yes"`, `"on"`이 켜짐. 비었거나 모르는 값은 꺼짐."""
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def settings_from(secrets: dict, args) -> Settings:
@@ -165,6 +173,7 @@ def settings_from(secrets: dict, args) -> Settings:
         no_vision=args.no_vision,
         max_segments=args.max_segments,
         once=args.once,
+        hl_clips=truthy(secrets.get("HL_CLIPS")) or args.clips,
     )
     if args.settle_sec is not None:
         s.settle_sec = args.settle_sec
@@ -264,8 +273,44 @@ def next_label(day: dict) -> str:
     return f"{len(day.get('games', [])) + 1}경기"
 
 
+# 경기별 클립·태깅 기록(MONTHLY_PLAN.md 3-4). 내부 키는 `{날짜}_{n경기}` 그대로 — 상대팀은 바뀔 수 있어 넣지 않는다.
+def clips_file(date_str: str, label: str) -> str:
+    return f"clips_{date_str}_{label}.json"
+
+
+def games_file(date_str: str, label: str) -> str:
+    return f"games_{date_str}_{label}.json"
+
+
+def _jsonable(data):
+    """numpy 숫자 등을 JSON으로 쓸 수 있게 바꾼다(_save_results와 같은 방식)."""
+    return json.loads(json.dumps(data, default=float))
+
+
+def _encode_info(quality: dict) -> dict:
+    """클립 인코딩 설정 — build_output이 실제로 쓴 값(빈 값은 그 기본값)."""
+    if quality.get("copy"):
+        return {"copy": True, "preset": None, "crf": None, "height": None}
+    crf = quality.get("crf")
+    return {"preset": quality.get("preset") or sh.ENCODE_PRESET,
+            "crf": sh.ENCODE_CRF if crf is None else crf, "height": sh.MAX_HEIGHT}
+
+
+def _clip_cand(c: dict) -> dict:
+    """클립 안에 든 채택 후보 하나를 clips_*.json에 남길 만큼만 줄인다."""
+    def num(value, digits):
+        return None if value is None else round(float(value), digits)
+
+    pan = c.get("pan")
+    return {"peak": num(c.get("peak"), 2), "type": c.get("type"),
+            "confidence": num(c.get("confidence"), 3), "delta_db": num(c.get("delta_db"), 2),
+            "pan": {"pos": pan.get("pos"), "state": pan.get("state")} if pan else None}
+
+
 def band_text(day: dict) -> str:
-    links = [(g["label"], g["yt_url"]) for g in day.get("games", []) if g.get("yt_url")]
+    """그날 BAND 글. 영상 줄은 `· {날짜}-{n경기}` — YouTube 제목과 같은 경기 이름이다(naming.game_name)."""
+    links = [(naming.game_name(day["date"], g["label"]), g["yt_url"])
+             for g in day.get("games", []) if g.get("yt_url")]
     return band_poster.format_post_content(links, match_date=day["date"])
 
 
@@ -610,6 +655,8 @@ class InboxRunner:
                                           workdir=game_dir))
         day = self.store.read_json(day_file(match_date)) or {"date": match_date, "games": []}
         label = next_label(day)
+        name = naming.game_name(match_date, label)      # YouTube 제목·설명·BAND 줄(Phase 1은 상대팀 없음)
+        file_name = naming.game_name(match_date, label, for_file=True)   # Drive 파일 이름에 쓰는 형태
         self.log(f"[{label}] 처리 시작 — {', '.join(p.remote.name for p in parts)} "
                  f"({group.duration / 60:.1f}분, {match_date})")
 
@@ -648,45 +695,51 @@ class InboxRunner:
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
             self._record("none", **game, cands=len(cands), maybe=len(maybe))
-            self._done(parts)
+            self._done(parts, file_name, warnings)
             self.summary["games"].append({"label": label, "date": match_date, "yt_url": None})
             return
 
         out_mp4 = game_dir / f"highlight_{match_date}_{label}.mp4"
         quality = sh.QUALITY_PRESETS[self.s.quality]
-        sh.build_output(str(video), selected, out_mp4, game_dir, title=self.s.default_title,
-                        preset=quality.get("preset"), crf=quality.get("crf"),
-                        copy_mode=bool(quality.get("copy")))
+        built = sh.build_output(str(video), selected, out_mp4, game_dir, title=self.s.default_title,
+                                preset=quality.get("preset"), crf=quality.get("crf"),
+                                copy_mode=bool(quality.get("copy")))
         selected_ids = {id(c) for c in selected}
         approved = [i for i, c in enumerate(cands) if id(c) in selected_ids]
-        title = yt_up.make_title(self.s.default_title, label, match_date)
-        yt_url, yt_error = self._publish(out_mp4, video, cands, approved, label, title)
+        yt_url, yt_error = self._publish(out_mp4, video, cands, approved, label, name)
 
+        # 아래에서 경고를 더 붙여도(원본 이름 변경·클립 보관) 알림에 실리도록 warnings를 같은 리스트로 둔다
+        # (_record가 game["warnings"]를 그대로 담고, 알림은 마지막에 한 번 만든다).
         if yt_url:
             record["yt_url"] = yt_url
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
             self._record("game", **game, yt_url=yt_url)
             if self.s.dry_run:   # 로컬 시험: 결과 영상을 05_output에 남겨 직접 확인할 수 있게
-                self.store.upload(out_mp4, "output", out_mp4.name)
+                self.store.upload(out_mp4, "output", naming.highlight_name(file_name))
         else:
-            link = self.store.upload(out_mp4, "output", out_mp4.name)
+            link = self.store.upload(out_mp4, "output", naming.highlight_name(file_name))
             record["backup_link"] = link
             day["games"].append(record)
             self.store.write_json(day_file(match_date), day)
             self._record("yt_fail", **game, error=yt_error, link=link)
-        self._done(parts)
+        originals = self._done(parts, file_name, warnings)
         self.summary["games"].append({"label": label, "date": match_date, "yt_url": yt_url,
                                       "error": yt_error})
 
+        if self.s.hl_clips:
+            self._store_clips(match_date, label, built, originals, quality, warnings,
+                              yt_url=yt_url, yt_title=name, yt_error=yt_error)
         if group.wants_2d:
             self._run_2d(video, selected, out_mp4, label, match_date, game_dir)
 
     def _publish(self, out_mp4, video, cands, approved, label, title):
+        """YouTube에 올린다. title은 경기 이름(naming.game_name)이고 설명 첫 줄에도 같은 이름을 쓴다."""
         if self.s.dry_run:
+            self.log(f"[{label}] (dry-run) YouTube 제목: {title}")
             return f"https://youtu.be/DRYRUN-{label}", None
         try:
-            url = yt_up.publish_highlight(str(out_mp4), str(video), cands, approved, label, title,
+            url = yt_up.publish_highlight(str(out_mp4), str(video), cands, approved, title, title,
                                           privacy=self.s.youtube_privacy,
                                           pre_sec=sh.PRE_SEC, post_sec=sh.POST_SEC)
             return url, None
@@ -735,7 +788,7 @@ class InboxRunner:
             run_radar_segments(str(video), segments, models, cfg, device, out_video=str(radar))
             final = game_dir / f"highlight_2d_{match_date}_{label}.mp4"
             rm.composite_pip(hl_out, radar, final, sh.run)
-            link = self.store.upload(final, "output", final.name)
+            link = self.store.upload(final, "output", naming.twod_name(match_date, label))
             self._record("2d_ok", label=label, link=link)
         except Exception as e:
             if is_auth_error(e):
@@ -743,11 +796,104 @@ class InboxRunner:
             self.log(f"[{label}] 2D 변환 실패: {e!r}")
             self._record("2d_fail", label=label, error=str(e)[:200])
 
+    # 클립 보관 (MONTHLY_PLAN.md Phase 1) ------------------------------------
+    def _store_clips(self, match_date: str, label: str, built, originals: list[dict], quality: dict,
+                     warnings: list[str], *, yt_url: str | None, yt_title: str,
+                     yt_error: str | None) -> None:
+        """하이라이트를 이룬 클립을 06_clips에 올리고 clips_*.json·games_*.json을 남긴다(HL_CLIPS).
+
+        하이라이트는 이미 게시됐으므로 실패해도 경기 처리를 되돌리지 않는다 — 인증 오류만 위로 올리고,
+        나머지는 `※ {label}: 클립 보관 실패 — …` 경고로 알린다. 클립을 일부만 올리면 번호가 하이라이트 속
+        위치와 어긋나므로 전부 올리거나, 실패하면 올린 것을 지우고 아무것도 남기지 않는다.
+        """
+        created_at = iso(self.now())
+        uploaded: list[RemoteFile] = []
+        try:
+            clips = self._upload_clips(match_date, label, built, uploaded)
+            clips_doc = {"date": match_date, "label": label, "created_at": created_at,
+                         "encode": _encode_info(quality), "originals": originals, "clips": clips}
+            self.store.write_json(clips_file(match_date, label), _jsonable(clips_doc))
+        except Exception as e:
+            if is_auth_error(e):
+                raise
+            self.log(f"[{label}] 클립 보관 실패: {e!r}")
+            self._discard_clips(uploaded)
+            warnings.append(f"클립 보관 실패 — {str(e)[:200]}")
+            return
+        self.log(f"[{label}] 클립 {len(clips)}개를 {FOLDERS['clips']}에 보관 "
+                 f"(합계 {sum(c['dur'] for c in clips):.1f}초)")
+
+        # 나중에 태깅하면 제목·월간에 반영되도록 경기 기록을 남긴다. 클립은 이미 보관됐으므로 실패해도 경고만.
+        published = yt_url is not None
+        try:
+            self.store.write_json(games_file(match_date, label), _jsonable({
+                "date": match_date, "label": label,
+                "status": "auto_published" if published else "failed", "auto_at": None,
+                "kind": None, "opponent": "", "attack_end": None, "switch_at_idx": None,
+                "clip_tags": {}, "tagged_at": None, "tag_source": "auto",
+                "published_clips": [c["idx"] for c in clips] if published else [],
+                "yt_url": yt_url, "yt_title": yt_title if published else None,
+                "published_at": created_at if published else None,
+                "attempts": 0, "error": None if published else yt_error}))
+        except Exception as e:
+            if is_auth_error(e):
+                raise
+            self.log(f"[{label}] 경기 기록(games) 저장 실패: {e!r}")
+            warnings.append(f"경기 기록 저장 실패 — {str(e)[:200]} (클립은 보관됨)")
+
+    def _upload_clips(self, match_date: str, label: str, built, uploaded: list[RemoteFile]) -> list[dict]:
+        """클립을 06_clips에 올리고 clips_*.json의 `clips` 항목을 만든다. 올린 파일은 uploaded에 쌓는다."""
+        clips = []
+        for idx, (path, merged) in enumerate(zip(built.clips, built.merged, strict=True), start=1):
+            dur = probe_media(path).duration           # 실제 길이 — 하이라이트 속 위치를 누적합으로 구한다
+            name = naming.clip_name(match_date, label, idx)
+            _, file_id = self.store.upload_with_id(path, "clips", name)
+            uploaded.append(RemoteFile(id=file_id, name=name, size=0, created_utc=self.now()))
+            clips.append({"idx": idx, "name": name, "file_id": file_id,
+                          "src_start": round(float(merged["start"]), 2),
+                          "src_end": round(float(merged["end"]), 2),
+                          "dur": round(float(dur), 3), "end": None,
+                          "cands": [_clip_cand(c) for c in merged["cands"]]})
+        return clips
+
+    def _discard_clips(self, uploaded: list[RemoteFile]) -> None:
+        """실패한 보관에서 이미 올라간 클립을 휴지통으로 보낸다(영구 삭제 아님). 못 보내도 로그만 남긴다."""
+        for rf in uploaded:
+            try:
+                self.store.trash(rf, "clips")
+            except Exception as e:
+                self.log(f"올라간 클립 정리 실패({rf.name}): {e!r}")
+
     # 상태 전이 --------------------------------------------------------------
-    def _done(self, parts: list[LocalPart]) -> None:
-        for p in parts:
+    def _done(self, parts: list[LocalPart], game_file: str | None = None,
+              warnings: list[str] | None = None) -> list[dict]:
+        """원본을 03_done으로 옮기고, game_file이 있으면 `{game_file}_원본[k].mp4`로 이름을 바꾼다.
+
+        이름 변경이 실패해도(같은 이름이 있거나 Drive 오류) 경고만 하고 넘어간다 — 인증 오류는 제외.
+        돌려주는 값: 원본마다 {"file_id", "name"}(바뀐 이름, 실패하면 원래 이름) — clips_*.json의 originals.
+        """
+        originals = []
+        for k, p in enumerate(parts, start=1):
             self.store.move(p.remote, "processing", "done")
             self._set_claim(p.remote, status="done", done_at=iso(self.now()))
+            entry = {"file_id": p.remote.id, "name": p.remote.name}
+            if game_file:
+                new_name = naming.original_name(game_file, k, len(parts), Path(p.remote.name).suffix)
+                try:
+                    renamed = self.store.rename(p.remote, "done", new_name)
+                except Exception as e:
+                    if is_auth_error(e):
+                        raise
+                    self.log(f"원본 이름 변경 실패({p.remote.name} → {new_name}): {e!r}")
+                    if warnings is not None:
+                        warnings.append(f"원본 이름을 바꾸지 못했습니다({p.remote.name}) — {str(e)[:120]}")
+                else:
+                    if renamed.id != p.remote.id:        # 로컬 저장소는 id가 파일명이라 바뀐다
+                        self.claims[renamed.id] = self.claims.pop(p.remote.id, {})
+                    self._set_claim(renamed, name=renamed.name, renamed_from=p.remote.name)
+                    entry = {"file_id": renamed.id, "name": renamed.name}
+            originals.append(entry)
+        return originals
 
     def _fail(self, files: list[RemoteFile], reason: str) -> None:
         for rf in files:
@@ -796,6 +942,8 @@ def parse_args(argv=None):
                     help="인박스가 빈 뒤 새 업로드를 더 기다리는 시간(분) 재정의(--local-inbox 기본 0)")
     ap.add_argument("--min-game-sec", type=float, help="처리할 최소 경기 길이(초) 재정의")
     ap.add_argument("--once", action="store_true", help="기다리지 않고 한 번만 확인하고 끝낸다")
+    ap.add_argument("--clips", action="store_true",
+                    help="HL_CLIPS와 같음 — 하이라이트 클립을 06_clips에 보관하고 clips_*/games_*.json을 남긴다(시험용)")
     ap.add_argument("--workdir", help="임시 작업 폴더(기본: 시스템 임시 폴더/hl_inbox)")
     return ap.parse_args(argv)
 

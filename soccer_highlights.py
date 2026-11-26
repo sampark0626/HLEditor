@@ -32,12 +32,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from scipy.io import wavfile
 
-import pan_signal
 import config
+import pan_signal
 
 # Windows cp949 콘솔에서 진행 로그의 이모지(✅⚠️❌)를 print할 때
 # UnicodeEncodeError가 발생해 처리 스레드가 죽는 것을 방지 — stdout/stderr를
@@ -353,7 +354,7 @@ def extract_video_clip_and_thumbnail(video, peak, workdir, idx, pre_sec=None, po
     seg_start = max(0.0, peak - pre_sec)
     seg_len = pre_sec + post_sec
     video_path = workdir / f"cand{idx}.mp4"
-    
+
     # 1. 비디오 클립 추출 (480p 저해상도 + 매우 빠른 인코딩 + 높은 CRF로 용량 대폭 축소)
     cmd_video = [
         "ffmpeg", "-y", "-ss", f"{seg_start:.2f}", "-i", video,
@@ -363,7 +364,7 @@ def extract_video_clip_and_thumbnail(video, peak, workdir, idx, pre_sec=None, po
         str(video_path), "-loglevel", "error"
     ]
     run(cmd_video)
-    
+
     # 2. 대표 썸네일 프레임 추출 (세그먼트 중간 시점, Web UI 리뷰 탭 렌더링용)
     thumb_path = workdir / f"cand{idx}_000.jpg"
     thumb_ts = seg_start + (seg_len / 2.0)
@@ -376,7 +377,7 @@ def extract_video_clip_and_thumbnail(video, peak, workdir, idx, pre_sec=None, po
         run(cmd_thumb)
     except Exception:
         pass  # 썸네일 추출 실패는 파이프라인 진행을 중단시키지 않음
-        
+
     return video_path
 
 
@@ -466,7 +467,7 @@ def classify_with_gemini(video_path, client):
                 video_file = client.files.get(name=video_file.name)
             if video_file.state.name == "FAILED":
                 raise RuntimeError("Gemini Files API video processing failed")
-                
+
             # 3. 비디오 분석 호출
             resp = client.models.generate_content(
                 model=VISION_MODEL,
@@ -666,9 +667,9 @@ def _drawtext_filter(title, font_name):
 
 
 def get_merged_timeline(selected_cands, pre_sec, post_sec):
-    """선택된 후보 구간들을 분석하여 겹치는 구간을 하나로 병합하고, 
+    """선택된 후보 구간들을 분석하여 겹치는 구간을 하나로 병합하고,
     최종 영상 내에서의 각 후보의 정확한 상대 peak 타임스탬프(초)를 계산한다.
-    
+
     반환:
       - merged_clips: [{"start": float, "end": float, "cands": [dict, ...]}]
       - cand_timestamps: {id(cand_dict): float}  # candidate 객체 레퍼런스 id 기준 타임스탬프
@@ -678,13 +679,13 @@ def get_merged_timeline(selected_cands, pre_sec, post_sec):
 
     # 시작 시간 기준으로 정렬
     sorted_cands = sorted(selected_cands, key=lambda c: float(c["peak"]) - pre_sec)
-    
+
     merged_clips = []
     for c in sorted_cands:
         peak = float(c["peak"])
         start = max(0.0, peak - pre_sec)
         end = peak + post_sec
-        
+
         if not merged_clips:
             merged_clips.append({"start": start, "end": end, "cands": [c]})
         else:
@@ -694,7 +695,7 @@ def get_merged_timeline(selected_cands, pre_sec, post_sec):
                 prev["cands"].append(c)
             else:
                 merged_clips.append({"start": start, "end": end, "cands": [c]})
-                
+
     cand_timestamps = {}
     cumulative_time = 0.0
     for clip in merged_clips:
@@ -705,17 +706,25 @@ def get_merged_timeline(selected_cands, pre_sec, post_sec):
             cand_start = max(0.0, peak - pre_sec)
             relative_start = cand_start - clip_start
             cand_timestamps[id(c)] = cumulative_time + relative_start
-            
+
         clip_duration = clip["end"] - clip["start"]
         cumulative_time += clip_duration
-        
+
     return merged_clips, cand_timestamps
+
+
+class BuildResult(NamedTuple):
+    """build_output의 반환값 — 하이라이트를 이루는 클립들(클립 보관·월간 영상의 재료)."""
+    clips: list    # 병합 구간마다 인코딩한 클립 파일(Path). workdir 안에 그대로 남는다 — merged와 같은 순서
+    merged: list   # get_merged_timeline의 병합 구간 [{"start", "end", "cands": [...]}] (원본 영상 기준 초)
 
 
 def build_output(video, segments, out_path, workdir, title=None,
                  preset=None, crf=None, copy_mode=False, max_height=None,
                  on_progress=None, should_cancel=None, pre_sec=None, post_sec=None):
     """선택된 구간들을 잘라 이어붙여 최종 영상 생성.
+
+    반환: BuildResult(clips, merged). 기존 호출부(PC 앱·CLI)는 반환값을 쓰지 않는다.
 
     title: 비어있지 않으면 영상 우상단에 작은 타이틀 워터마크를 입힌다.
     preset/crf: 인코딩 속도/용량 (기본 ENCODE_PRESET/ENCODE_CRF).
@@ -809,6 +818,7 @@ def build_output(video, segments, out_path, workdir, title=None,
         encoding="utf-8")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listfile),
          "-c", "copy", str(out_path), "-loglevel", "error"])
+    return BuildResult(clips=clip_paths, merged=merged_clips)
 
 
 # ----------------------------------------------------------------------------

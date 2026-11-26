@@ -70,6 +70,38 @@ def test_progress_callback_reaches_total(tmp_path, monkeypatch, segments):
     assert max(dones) == len(segments)
 
 
+def test_returns_clip_files_and_merged_ranges_in_order(tmp_path, monkeypatch, segments):
+    """클립 보관(MONTHLY_PLAN.md Phase 1)이 쓰는 반환값 — 클립 경로와 병합 구간이 같은 순서로 대응한다."""
+    monkeypatch.setattr(sh, "run", _fake_run_factory())
+    result = sh.build_output("fake_video.mp4", segments, str(tmp_path / "out.mp4"), tmp_path,
+                             copy_mode=True)
+    clips, merged = result                                        # 튜플처럼 풀어 쓸 수 있다
+    assert result.clips is clips and result.merged is merged
+    assert clips == [tmp_path / f"clip{i:03d}.mp4" for i in range(len(segments))]
+    assert all(p.exists() for p in clips)                          # 호출한 쪽이 올릴 수 있게 남아 있다
+    assert [m["start"] for m in merged] == [0.0, 12.0, 32.0, 52.0, 72.0, 92.0]
+    assert [m["end"] for m in merged] == [5.0, 25.0, 45.0, 65.0, 85.0, 105.0]
+    assert [m["cands"] for m in merged] == [[s] for s in segments]
+
+
+def test_overlapping_segments_return_one_clip_with_both_candidates(tmp_path, monkeypatch):
+    monkeypatch.setattr(sh, "run", _fake_run_factory())
+    segments = [{"peak": 10.0}, {"peak": 14.0}]
+    clips, merged = sh.build_output("fake_video.mp4", segments, str(tmp_path / "out.mp4"), tmp_path,
+                                    copy_mode=True, pre_sec=8.0, post_sec=5.0)
+    assert clips == [tmp_path / "clip000.mp4"]
+    assert [(m["start"], m["end"]) for m in merged] == [(2.0, 19.0)]
+    assert merged[0]["cands"] == segments
+
+
+def test_callers_that_ignore_the_return_value_still_work(tmp_path, monkeypatch):
+    """PC 앱(routes_jobs)·CLI는 반환값을 쓰지 않는다 — 문장으로만 호출해도 그대로 동작한다."""
+    monkeypatch.setattr(sh, "run", _fake_run_factory())
+    out_path = tmp_path / "out.mp4"
+    sh.build_output("fake_video.mp4", [{"peak": 5.0}], str(out_path), tmp_path, copy_mode=True)
+    assert (tmp_path / "concat.txt").exists()
+
+
 def test_cancellation_stops_before_concat(tmp_path, monkeypatch, segments):
     monkeypatch.setattr(sh, "run", _fake_run_factory())
     call_count = {"n": 0}
@@ -103,26 +135,26 @@ def test_overlapping_segments_merged(tmp_path, monkeypatch):
     monkeypatch.setattr(sh, "run", _fake_run_factory())
     segments = [{"peak": 10.0}, {"peak": 14.0}]
     out_path = tmp_path / "out.mp4"
-    
+
     # timeline 도출 함수 자체 검증
     merged_clips, cand_timestamps = sh.get_merged_timeline(segments, 8.0, 5.0)
     assert len(merged_clips) == 1
     assert merged_clips[0]["start"] == 2.0
     assert merged_clips[0]["end"] == 19.0
-    
+
     # 각 후보의 시작점이 최종 영상 내 어디에 위치하는지 검증
     # peak 10.0 -> segment start 2.0 -> 상대적 시작 0.0
     # peak 14.0 -> segment start 6.0 -> 상대적 시작 4.0
     assert cand_timestamps[id(segments[0])] == 0.0
     assert cand_timestamps[id(segments[1])] == 4.0
-    
+
     # build_output 실행 검증 (1개 클립만 빌드되어야 함)
     sh.build_output(
         "fake_video.mp4", segments, str(out_path), tmp_path,
         copy_mode=True, pre_sec=8.0, post_sec=5.0
     )
-    
+
     listfile = (tmp_path / "concat.txt").read_text(encoding="utf-8")
-    lines = [l for l in listfile.splitlines() if l.strip()]
+    lines = [line for line in listfile.splitlines() if line.strip()]
     assert len(lines) == 1
     assert "clip000.mp4" in lines[0]
