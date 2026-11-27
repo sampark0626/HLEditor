@@ -48,6 +48,7 @@ from kaggle_runner.analysis import analyze_candidates  # noqa: E402
 from kaggle_runner.common import (  # noqa: E402
     AUTH_HELP,
     KST,
+    REQUESTS_FILE,
     clips_file,
     day_file,
     from_iso,
@@ -56,8 +57,10 @@ from kaggle_runner.common import (  # noqa: E402
     iso,
     kst_date,
 )
+from kaggle_runner.monthly import MonthlyBuilder, build_monthly_report  # noqa: E402
 from kaggle_runner.notify import Notifier  # noqa: E402
 from kaggle_runner.publish import Publisher  # noqa: E402
+from kaggle_runner.retention import cleanup_clips  # noqa: E402
 from kaggle_runner.stores import FOLDERS, DriveStore, LocalStore, RemoteFile  # noqa: E402
 
 SECRETS_FILENAME = "hl_secrets.json"
@@ -121,6 +124,11 @@ class Settings:
     # 클립 보관이 꼭 필요해 HL_CLIPS와 상관없이 클립을 남기고, 클립 보관에 실패하면 예전처럼 바로 게시한다.
     hl_review: bool = False
     review_url: str = ""              # 비밀값 REVIEW_URL — 검토 알림을 누르면 열 검토 페이지 주소(Apps Script 웹 앱)
+    # 월간 영상(Phase 3). 비밀값으로 바꿀 수 있다: MONTHLY_TARGET_MIN, MONTHLY_CRF.
+    # 클립 보관 기간(월간 done + 7일, 경기일 + 75일)은 일부러 비밀값으로 열지 않았다 — Apps Script의 "정리 7일 전 알림"이
+    # 같은 날짜를 계산해야 하는데 Apps Script는 Kaggle 비밀값을 못 읽는다. retention.py·Code.gs의 상수와 clip_rules.json이 기준.
+    monthly_target_min: float = 6.0   # 월간 영상 길이(분) — 이 길이에 닿을 때까지 장면을 고른다
+    monthly_crf: int = 20             # 월간은 전체를 재인코딩한다(경기 하이라이트의 25보다 고화질)
 
 
 def find_secrets_file(root=Path("/kaggle/input")) -> Path | None:
@@ -174,6 +182,8 @@ def settings_from(secrets: dict, args) -> Settings:
         hl_clips=truthy(secrets.get("HL_CLIPS")) or args.clips,
         hl_review=truthy(secrets.get("HL_REVIEW")) or args.review,
         review_url=str(secrets.get("REVIEW_URL") or "").strip(),
+        monthly_target_min=num("MONTHLY_TARGET_MIN", 6.0),
+        monthly_crf=num("MONTHLY_CRF", 20, int),
     )
     if args.settle_sec is not None:
         s.settle_sec = args.settle_sec
@@ -320,6 +330,7 @@ def auto_publish_at(match_date: str, now: datetime) -> str:
 # 한 번의 실행 결과를 알림으로 모으는 이벤트 종류(build_report·build_review_report가 읽는다)
 GAME_KINDS = ("game", "none", "yt_fail")        # 경기 하나를 처리한 결과
 PROBLEM_KINDS = ("none", "yt_fail", "fail", "2d_fail", "pub_fail", "retitle_fail")
+MONTHLY_KINDS = ("monthly", "monthly_fail")     # 월간 영상 결과 — 알림이 따로 간다
 # 검토 대기 경기가 있으면 같은 분석 단계의 확인할 일(※ 줄)은 검토 알림에 같이 싣는다
 ANALYSIS_NOTE_KINDS = ("none", "fail", "2d_ok", "2d_fail")
 
@@ -493,6 +504,7 @@ class InboxRunner:
         self.log = log
         self.claims: dict = store.read_json(CLAIMS_FILE) or {}
         self.publisher = Publisher(self)                # 검토 뒤 게시·제목 변경(requests.json) — publish.py
+        self.monthly = MonthlyBuilder(self)             # 월간 영상(requests.json) — monthly.py
         self.local: dict[str, LocalPart] = {}
         self.report: list[dict] = []                    # 아직 알리지 않은 결과 — flush_report가 한 통으로 보낸다
         self.last_activity: datetime | None = None      # 마지막으로 영상을 받거나 경기를 끝낸 시각
@@ -509,9 +521,25 @@ class InboxRunner:
         self._save_claims()
 
     # 실행 루프 --------------------------------------------------------------
-    def process_requests(self) -> None:
-        """검토 페이지가 넣은 게시·제목 변경 요청을 처리한다(publish.py). 요청이 없으면 아무 일도 안 한다."""
-        self.publisher.process_requests()
+    def process_requests(self, monthly: bool = False) -> None:
+        """Apps Script가 requests.json에 넣은 요청을 처리한다 — 게시·제목 변경(publish.py), monthly=True면 월간 영상(monthly.py)도.
+
+        게시·제목 변경은 가볍고 빨리 나가야 해서 실행 시작·기다리는 동안에도 처리하지만, 월간은 클립 내려받기와
+        재인코딩에 수 분~수십 분이 걸려 같은 실행의 경기 영상 처리를 늦추므로 인박스를 다 처리한 뒤(run의 마지막)에만 한다.
+        요청이 없으면 아무 일도 안 한다. 대기열은 읽기만 한다(처리 여부는 대상 파일의 상태로 판단 — Apps Script가 정리).
+        """
+        try:
+            doc = self.store.read_json(REQUESTS_FILE)
+        except Exception as e:
+            if is_auth_error(e):
+                raise
+            self.log(f"요청 대기열을 읽지 못했습니다(다음에 다시 확인): {e!r}")
+            return
+        items = (doc or {}).get("items") or []
+        if items:
+            self.publisher.handle(items)
+            if monthly:
+                self.monthly.handle(items)
 
     def run(self) -> dict:
         self.recover_processing()
@@ -538,7 +566,7 @@ class InboxRunner:
                 break
             self.process_requests()
             self.sleep(POLL_SEC)
-        self.process_requests()   # 인박스를 처리하는 동안 들어온 요청
+        self.process_requests(monthly=True)   # 인박스를 다 처리한 뒤: 그동안 들어온 게시 요청 + 월간 영상(오래 걸린다)
         self.flush_report()
         self.summary["finished_at"] = iso(self.now())
         return self.summary
@@ -584,6 +612,15 @@ class InboxRunner:
         events, self.report = self.report, []
         if not events:
             return
+        self._flush_game_events([e for e in events if e["kind"] not in MONTHLY_KINDS])
+        # 월간 영상 결과는 경기 하이라이트 알림과 섞지 않고(본문이 BAND에 붙여넣는 글이다) 한 통씩 따로, 경기 알림 뒤에 보낸다
+        for e in [e for e in events if e["kind"] in MONTHLY_KINDS]:
+            title, message, tags = build_monthly_report(e)
+            self.notify.send(title, message, tags=tags)
+
+    def _flush_game_events(self, events: list[dict]) -> None:
+        if not events:
+            return
         rest = [e for e in events if e["kind"] != "pending"]
         pending = [e for e in events if e["kind"] == "pending"]
         if pending:
@@ -625,6 +662,13 @@ class InboxRunner:
         for fid in stale:
             self.claims.pop(fid, None)
         self._save_claims()
+        # 06_clips의 클립 정리(MONTHLY_PLAN.md 3-8) — 월간이 끝나고 7일, 늦어도 경기일 + 75일. 인증 오류만 위로
+        try:
+            cleanup_clips(self)
+        except Exception as e:
+            if is_auth_error(e):
+                raise
+            self.log(f"클립 정리를 건너뜁니다(다음 실행에서 다시): {e!r}")
 
     def claim_new(self) -> list[str]:
         keys = ["inbox"] + (["inbox_2d"] if self.gpu else [])

@@ -1,0 +1,41 @@
+{
+ "_doc": "MONTHLY_PLAN.md 3-8 클립 만료 규칙 — Python(tests/test_retention.py)과 Apps Script(code_test.js)가 같이 읽는다.",
+ "expiryCases": [
+  {
+   "name": "월간이 없으면 경기일(KST 자정) + 75일",
+   "gameDate": "2026-12-06",
+   "monthlyDoneAt": null,
+   "expiresAt": "2027-02-18T15:00:00+00:00"
+  },
+  {
+   "name": "월간이 끝났으면 끝난 뒤 7일 — 상한보다 이르다",
+   "gameDate": "2026-12-06",
+   "monthlyDoneAt": "2027-01-01T00:30:00+00:00",
+   "expiresAt": "2027-01-08T00:30:00+00:00"
+  },
+  {
+   "name": "월간이 아주 늦게 끝나면 상한(75일)이 먼저",
+   "gameDate": "2026-12-06",
+   "monthlyDoneAt": "2027-03-01T00:00:00+00:00",
+   "expiresAt": "2027-02-18T15:00:00+00:00"
+  },
+  {
+   "name": "월말 경기도 같은 규칙",
+   "gameDate": "2026-12-31",
+   "monthlyDoneAt": "2027-01-01T01:00:00+00:00",
+   "expiresAt": "2027-01-08T01:00:00+00:00"
+  },
+  {
+   "name": "월간 끝난 뒤 7일이 상한과 정확히 같은 시각",
+   "gameDate": "2026-12-06",
+   "monthlyDoneAt": "2027-02-11T15:00:00+00:00",
+   "expiresAt": "2027-02-18T15:00:00+00:00"
+  },
+  {
+   "name": "11월 경기(첫 대상)",
+   "gameDate": "2026-11-29",
+   "monthlyDoneAt": "2026-12-01T00:10:00+00:00",
+   "expiresAt": "2026-12-08T00:10:00+00:00"
+  }
+ ]
+}

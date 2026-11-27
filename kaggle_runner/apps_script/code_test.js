@@ -371,9 +371,9 @@ const gameDoc = (over = {}) => Object.assign({
   attack_end: null, switch_at_idx: null, clip_tags: {}, tagged_at: null, tag_source: null,
   published_clips: [], yt_url: null, yt_title: null, published_at: null, attempts: 0, error: null,
 }, over);
-const clipsDoc = (ends = [null, null, null], label = '1경기') => ({
-  date: D, label, clips: ends.map((end, i) => ({
-    idx: i + 1, name: `${D}-${label}_c00${i + 1}.mp4`, file_id: `fid${i + 1}`, src_start: 100 * (i + 1),
+const clipsDoc = (ends = [null, null, null], label = '1경기', date = D) => ({
+  date, label, clips: ends.map((end, i) => ({
+    idx: i + 1, name: `${date}-${label}_c00${i + 1}.mp4`, file_id: `fid${i + 1}`, src_start: 100 * (i + 1),
     src_end: 100 * (i + 1) + 13, dur: 13, end,
     cands: [{peak: 108 + 100 * i, type: 'goal', confidence: 0.9, delta_db: 12, pan: null}]})),
 });
@@ -384,7 +384,7 @@ const stateOf = (...games) => {
     const doc = Array.isArray(g) ? g[0] : g;
     const ends = Array.isArray(g) ? g[1] : undefined;
     state[`games_${doc.date}_${doc.label}.json`] = JSON.stringify(doc);
-    state[`clips_${doc.date}_${doc.label}.json`] = JSON.stringify(clipsDoc(ends, doc.label));
+    state[`clips_${doc.date}_${doc.label}.json`] = JSON.stringify(clipsDoc(ends, doc.label, doc.date));
   });
   return state;
 };
@@ -750,6 +750,320 @@ test('notify_: click이 있으면 payload에 싣고 없으면 싣지 않는다(�
   const [a, b] = env.of('https://ntfy.sh/').map((c) => c.body);
   assert.deepStrictEqual(plain(a), {topic: 'hl-topic', title: 't1', message: 'm1', tags: ['soccer']});
   assert.strictEqual(b.click, 'https://example.com/x');
+});
+
+// ═══ 월간 영상 · 클립 정리 (MONTHLY_PLAN.md Phase 3) ═══════════════════════════════
+const CLIP_RULES = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'tests', 'data', 'clip_rules.json'), 'utf8'));
+const JAN1_9AM = Date.UTC(2027, 0, 1, 0, 0, 0);               // 2027-01-01(금) 09:00 KST — 지난달(12월) 월간을 만드는 날
+const DAY = 86400000;
+const M = '2026-12';
+
+/** 12월 경기들 — kind가 null이면 태깅 안 된 경기 */
+const decGames = (...specs) => specs.map(([date, label, kind, over]) => gameDoc(Object.assign({
+  date, label, kind, status: 'published', tag_source: kind ? 'manual' : 'auto', auto_at: null,
+  opponent: kind === 'opponent' ? 'OO FC' : '', yt_url: 'https://youtu.be/x', yt_title: `${date}-${label}`}, over || {})));
+const monthlyDoc = (over = {}) => Object.assign({month: M, status: 'waiting_tags', picked: [], yt_url: null,
+  drive_file_id: null, drive_link: null, done_at: null, attempts: 0, error: null,
+  created_at: '2027-01-01T00:00:00+00:00', reminded_at: null}, over);
+const monthEnv = (games, extra = {}, opts = {}) => {
+  const state = stateOf(...games);
+  Object.keys(extra).forEach((k) => { state[k] = JSON.stringify(extra[k]); });
+  return makeEnv(Object.assign({now: JAN1_9AM, state, props: {REVIEW_URL}}, opts));
+};
+const requestsOf = (env) => (env.state['requests.json'] ? env.json('requests.json').items.map((i) => i.type + ':' + (i.month || i.date)) : []);
+
+// ─── 클립 만료 규칙 — pytest(tests/test_retention.py)와 같은 파일을 읽는다 ──────────
+CLIP_RULES.expiryCases.forEach((c) => {
+  test('규칙 표(공유) clipExpiresAt_ — ' + c.name, () => {
+    const env = makeEnv();
+    const done = c.monthlyDoneAt ? Date.parse(c.monthlyDoneAt) : null;
+    assert.strictEqual(env.ctx.clipExpiresAt_(c.gameDate, done), Date.parse(c.expiresAt));
+  });
+});
+
+test('클립 보관 기간 상수는 러너(retention.py)와 똑같다 — 러너는 비밀값으로 못 바꾸므로 값이 곧 기준이다', () => {
+  const env = makeEnv();
+  const py = fs.readFileSync(path.join(__dirname, '..', 'retention.py'), 'utf8');
+  const pyConst = (name) => Number(new RegExp('^' + name + ' = (\\d+)', 'm').exec(py)[1]);
+  assert.strictEqual(env.ctx.CLIP_KEEP_AFTER_DONE_DAYS, pyConst('CLIP_KEEP_AFTER_DONE_DAYS'));
+  assert.strictEqual(env.ctx.CLIP_MAX_DAYS, pyConst('CLIP_MAX_DAYS'));
+  assert.deepStrictEqual([env.ctx.CLIP_KEEP_AFTER_DONE_DAYS, env.ctx.CLIP_MAX_DAYS], [7, 75]);
+});
+
+test('previousMonth_: 1월에는 지난해 12월', () => {
+  const env = makeEnv();
+  assert.strictEqual(env.ctx.previousMonth_('2027-01-01'), '2026-12');
+  assert.strictEqual(env.ctx.previousMonth_('2026-12-01'), '2026-11');
+  assert.strictEqual(env.ctx.previousMonth_('2026-03-01'), '2026-02');
+});
+
+// ─── 1일: 지난달 월간 만들기 시작 ────────────────────────────────────────────
+test('1일 dailyJobs: 모든 경기가 태깅됐으면 월간을 바로 build로 만들고 요청·러너를 보낸다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-06', '2경기', 'scrimmage']));
+  const msg = env.ctx.dailyJobs();
+  assert.match(msg, / · 월간: 2026-12 만들기 시작$/);
+  const doc = env.json(`monthly_${M}.json`);
+  assert.deepStrictEqual([doc.status, doc.attempts, doc.error, doc.yt_url], ['build', 0, null, null]);
+  assert.match(doc.created_at, /^2027-01-01T00:00:00\+00:00$/);
+  assert.deepStrictEqual(requestsOf(env), [`monthly:${M}`]);
+  assert.strictEqual(kernelPushes(env), 1);
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 0);            // 완료 알림은 러너가 보낸다
+});
+
+test('1일 dailyJobs: 태깅 안 된 경기가 있으면 waiting_tags로 기다리며 알린다(클릭 = 월간 화면)', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', null], ['2026-12-20', '1경기', null]));
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'waiting_tags');
+  assert.deepStrictEqual(requestsOf(env), []);
+  assert.strictEqual(kernelPushes(env), 0);
+  const [note] = env.of('https://ntfy.sh/');
+  assert.strictEqual(note.body.title, '태깅 안 된 경기 2개');
+  assert.strictEqual(note.body.click, `${REVIEW_URL}?page=review&month=${M}`);
+  assert.match(note.body.message, /2026년 12월 월간 하이라이트를 만들려면/);
+  assert.match(note.body.message, /2026-12-13-1경기\n2026-12-20-1경기/);
+  assert.doesNotMatch(note.body.message, /2026-12-06/);               // 태깅된 경기는 목록에 없다
+});
+
+test('1일이 아니면 월간을 만들지 않는다 / 경기가 없는 달은 만들지 않는다 / 두 번 불러도 한 번만', () => {
+  const games = decGames(['2026-12-06', '1경기', 'opponent']);
+  const notFirst = monthEnv(games, {}, {now: JAN1_9AM + DAY});          // 1월 2일
+  notFirst.ctx.dailyJobs();
+  assert.strictEqual(notFirst.state[`monthly_${M}.json`], undefined);
+  const empty = makeEnv({now: JAN1_9AM, state: {}});
+  empty.ctx.dailyJobs();
+  assert.deepStrictEqual(Object.keys(empty.state), []);                 // 12월 경기가 없다
+  const env = monthEnv(decGames(['2026-12-06', '1경기', null]));
+  env.ctx.dailyJobs();
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 1);             // 알림도 한 번
+});
+
+test('1일 dailyJobs: 같은 날 자동 게시된 경기(종류 없음)도 태깅 안 된 경기로 센다', () => {
+  const pending = gameDoc({date: '2026-12-31', label: '1경기', status: 'pending', auto_at: '2027-01-01T09:00:00+09:00'});
+  const env = monthEnv([pending].concat(decGames(['2026-12-06', '1경기', 'scrimmage'])));
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.json('games_2026-12-31_1경기.json').status, 'publish');   // 먼저 자동 게시
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'waiting_tags');         // 그 경기는 아직 태깅 전
+});
+
+// ─── 태깅을 기다리는 월간 ────────────────────────────────────────────────────
+test('waiting_tags: 3일 뒤 한 번 재알림하고, 그 전에는 아무것도 하지 않는다', () => {
+  const games = decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', null]);
+  const early = monthEnv(games, {[`monthly_${M}.json`]: monthlyDoc()}, {now: JAN1_9AM + 2 * DAY});
+  early.ctx.dailyJobs();
+  assert.strictEqual(early.of('https://ntfy.sh/').length, 0);
+  const env = monthEnv(games, {[`monthly_${M}.json`]: monthlyDoc()}, {now: JAN1_9AM + 3 * DAY});
+  assert.match(env.ctx.dailyJobs(), /월간: 2026-12 재알림/);
+  const [note] = env.of('https://ntfy.sh/');
+  assert.match(note.body.title, /^태깅 안 된 경기 1개 — 2026년 12월 월간 대기 중$/);
+  assert.match(note.body.message, /^4일 안에 태깅하지 않으면/);
+  assert.ok(env.json(`monthly_${M}.json`).reminded_at);
+  env.now += DAY;
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 1);               // 다시 알리지 않는다
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'waiting_tags');
+});
+
+test('waiting_tags: 7일이 지나면 태깅 안 된 경기를 빼고 만들기 시작한다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', null]),
+    {[`monthly_${M}.json`]: monthlyDoc()}, {now: JAN1_9AM + 7 * DAY});
+  assert.match(env.ctx.dailyJobs(), /월간: 2026-12 태깅 안 된 1경기를 빼고 만들기 시작/);
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'build');
+  assert.deepStrictEqual(requestsOf(env), [`monthly:${M}`]);
+  assert.strictEqual(kernelPushes(env), 1);
+});
+
+test('waiting_tags: 그사이 모두 태깅됐으면 다음 dailyJobs에서 만들기 시작한다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', 'scrimmage']),
+    {[`monthly_${M}.json`]: monthlyDoc()}, {now: JAN1_9AM + DAY});
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'build');
+  assert.strictEqual(kernelPushes(env), 1);
+});
+
+test('마지막 미태깅 경기를 태깅하는 순간 기다리던 월간이 만들기 시작한다', () => {
+  const unposted = {status: 'pending', yt_url: null, yt_title: null};      // 게시 전이라 제목 변경 요청이 끼지 않는다
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', null, unposted],
+      ['2026-12-20', '1경기', null, unposted]),
+    {[`monthly_${M}.json`]: monthlyDoc()}, {now: JAN1_9AM + DAY});
+  env.ctx.reviewSetGame('2026-12-13', '1경기', {kind: 'scrimmage'});
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'waiting_tags');          // 아직 한 경기가 남았다
+  assert.strictEqual(kernelPushes(env), 0);
+  env.ctx.reviewSetGame('2026-12-20', '1경기', {kind: 'opponent', opponent: 'XX FC'});
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'build');
+  assert.deepStrictEqual(requestsOf(env), [`monthly:${M}`]);
+  assert.strictEqual(kernelPushes(env), 1);
+});
+
+test('태깅해도 월간이 없거나 이미 만들어졌으면 건드리지 않는다', () => {
+  const none = monthEnv(decGames(['2026-12-06', '1경기', null]));
+  none.ctx.reviewSetGame('2026-12-06', '1경기', {kind: 'scrimmage'});
+  assert.strictEqual(none.state[`monthly_${M}.json`], undefined);
+  const done = monthEnv(decGames(['2026-12-06', '1경기', null]), {[`monthly_${M}.json`]: monthlyDoc({status: 'done'})});
+  done.ctx.reviewSetGame('2026-12-06', '1경기', {kind: 'scrimmage'});
+  assert.strictEqual(done.json(`monthly_${M}.json`).status, 'done');                 // 다시 만들기는 사람이 누른다
+});
+
+// ─── tick: 월간 요청도 일거리 ────────────────────────────────────────────────
+test('tick: build·running 월간은 일거리이고 done·failed·waiting_tags는 아니다', () => {
+  const req = {'requests.json': {items: [{id: 'r1', type: 'monthly', month: M}]}};
+  const games = decGames(['2026-12-06', '1경기', 'opponent']);
+  for (const status of ['build', 'running']) {
+    const env = monthEnv(games, Object.assign({[`monthly_${M}.json`]: monthlyDoc({status})}, req), {files: {'01_inbox': []}});
+    assert.match(env.ctx.tick(), /^게시 요청 1건 발견 — Kaggle 실행 요청함$/, status);
+  }
+  for (const status of ['done', 'failed', 'waiting_tags']) {
+    const env = monthEnv(games, Object.assign({[`monthly_${M}.json`]: monthlyDoc({status})}, req), {files: {'01_inbox': []}});
+    assert.strictEqual(env.ctx.tick(), '새 영상 없음', status);
+  }
+});
+
+test('dailyJobs: 끝난 월간 요청은 대기열에서 지우고, 같은 달 요청은 하나만 둔다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent']),
+    {[`monthly_${M}.json`]: monthlyDoc({status: 'done', done_at: '2027-01-01T01:00:00+00:00'}),
+     'requests.json': {items: [{id: 'r1', type: 'monthly', month: M}]}}, {now: JAN1_9AM + 2 * DAY});
+  assert.match(env.ctx.dailyJobs(), /정리한 요청 1건/);
+  assert.deepStrictEqual(requestsOf(env), []);
+});
+
+// ─── 월간 화면 ───────────────────────────────────────────────────────────────
+test('reviewMonth: 그달 경기의 태깅 여부·월간 대상 장면 수·정리된 클립과 월간 상태를 보여 준다', () => {
+  const games = decGames(['2026-12-06', '1경기', 'opponent', {attack_end: 'building'}], ['2026-12-13', '1경기', null],
+    ['2026-12-20', '1경기', 'scrimmage']);
+  const state = stateOf([games[0], ['building', 'tree', 'tree']], games[1], games[2]);
+  state['clips_2026-12-20_1경기.json'] = JSON.stringify(Object.assign(clipsDoc([null, null], '1경기', '2026-12-20'), {expired: true}));
+  state[`monthly_${M}.json`] = JSON.stringify(monthlyDoc({status: 'done', yt_url: 'https://youtu.be/m', drive_link: 'https://d/1',
+    done_at: '2027-01-01T01:00:00+00:00', picked: [{}, {}, {}], duration_sec: 361.5}));
+  const env = makeEnv({now: JAN1_9AM, state});
+  const v = plain(env.ctx.reviewMonth(M));
+  assert.strictEqual(v.untagged, 1);
+  assert.deepStrictEqual(v.games.map((g) => [g.label, g.tagged, g.clipCount, g.monthlyCount, g.expired]), [
+    ['1경기', true, 3, 3, false], ['1경기', false, 3, 0, false], ['1경기', true, 2, 2, true]]);
+  assert.deepStrictEqual([v.monthly.status, v.monthly.ytUrl, v.monthly.driveLink, v.monthly.pickedCount, v.monthly.canBuild],
+    ['done', 'https://youtu.be/m', 'https://d/1', 3, true]);
+  assert.strictEqual(plain(makeEnv({now: JAN1_9AM, state: stateOf(...games)}).ctx.reviewMonth(M)).monthly.status, 'none');
+  assert.throws(() => env.ctx.reviewMonth('2026-12-01'), /달 형식/);
+});
+
+test('reviewList: 월마다 상태와 태깅 안 된 경기 수를 보여 준다(최근 달이 위)', () => {
+  const games = decGames(['2026-11-29', '1경기', 'opponent'], ['2026-12-06', '1경기', null], ['2026-12-13', '1경기', 'scrimmage']);
+  const env = monthEnv(games, {[`monthly_${M}.json`]: monthlyDoc()}, {now: Date.UTC(2026, 11, 20, 3)});
+  const months = plain(env.ctx.reviewList()).months;
+  assert.deepStrictEqual(months.map((m) => [m.month, m.games, m.untagged, m.status]),
+    [['2026-12', 2, 1, 'waiting_tags'], ['2026-11', 1, 0, 'none']]);
+});
+
+test('reviewRebuildMonth: 끝난·실패한 월간을 다시 build로 돌리고 러너를 깨운다', () => {
+  for (const status of ['done', 'failed']) {
+    const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent']),
+      {[`monthly_${M}.json`]: monthlyDoc({status, attempts: 3, error: '지난 오류', yt_url: 'https://youtu.be/old'})});
+    const out = plain(env.ctx.reviewRebuildMonth(M));
+    assert.strictEqual(out.started, true);
+    const doc = env.json(`monthly_${M}.json`);
+    assert.deepStrictEqual([doc.status, doc.attempts, doc.error], ['build', 0, null], status);
+    assert.strictEqual(doc.yt_url, 'https://youtu.be/old');               // 러너가 새 값으로 덮어쓸 때까지 그대로
+    assert.deepStrictEqual(requestsOf(env), [`monthly:${M}`]);
+    assert.strictEqual(kernelPushes(env), 1);
+  }
+});
+
+test('reviewRebuildMonth: 만드는 중이면 거부하고, 경기가 없는 달은 거부하고, 문서가 없는 달은 만들 수 있다', () => {
+  for (const status of ['build', 'running']) {
+    const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent']), {[`monthly_${M}.json`]: monthlyDoc({status})});
+    assert.throws(() => env.ctx.reviewRebuildMonth(M), /이미 만드는 중입니다/);
+    assert.strictEqual(kernelPushes(env), 0);
+  }
+  assert.throws(() => monthEnv(decGames(['2026-11-29', '1경기', 'opponent'])).ctx.reviewRebuildMonth(M), /경기 기록이 없습니다/);
+  const env = monthEnv(decGames(['2026-12-06', '1경기', null]));                // 1일 자동 생성을 놓친 달
+  env.ctx.reviewRebuildMonth(M);
+  assert.strictEqual(env.json(`monthly_${M}.json`).status, 'build');
+  assert.ok(env.json(`monthly_${M}.json`).created_at);
+  const waiting = monthEnv(decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', null]),
+    {[`monthly_${M}.json`]: monthlyDoc()});
+  waiting.ctx.reviewRebuildMonth(M);                                           // 태깅 대기 중 "지금 만들기"
+  assert.strictEqual(waiting.json(`monthly_${M}.json`).status, 'build');
+});
+
+test('월간 서버 함수도 소유자만 부를 수 있다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent']), {}, {user: ''});
+  assert.throws(() => env.ctx.reviewMonth(M), /거부됨: 소유자 본인만/);
+  assert.throws(() => env.ctx.reviewRebuildMonth(M), /거부됨: 소유자 본인만/);
+  assert.strictEqual(env.state[`monthly_${M}.json`], undefined);
+});
+
+test('요청 대기열: 같은 달 월간 요청은 한 번만, 다른 달은 따로 들어간다', () => {
+  const env = monthEnv(decGames(['2026-12-06', '1경기', 'opponent']));
+  const folder = env.ctx.requireState_();
+  env.ctx.addRequest_(folder, {type: 'monthly', month: '2026-12'});
+  env.ctx.addRequest_(folder, {type: 'monthly', month: '2026-12'});
+  env.ctx.addRequest_(folder, {type: 'monthly', month: '2027-01'});
+  assert.deepStrictEqual(requestsOf(env), ['monthly:2026-12', 'monthly:2027-01']);
+});
+
+// ─── 클립 정리 7일 전 예고 ───────────────────────────────────────────────────
+test('정리 예고: 월간이 끝난 경기는 정리(done + 7일)가 코앞이어도 예고하지 않는다 — 끝난 다음 날부터 매번 울리지 않게', () => {
+  const games = decGames(['2026-12-06', '1경기', 'opponent'], ['2026-12-13', '1경기', 'scrimmage']);
+  const extra = {[`monthly_${M}.json`]: monthlyDoc({status: 'done', done_at: '2027-01-01T01:00:00+00:00'})};
+  for (const days of [0, 2, 6]) {                                              // 완료 당일, 5일 전, 하루 전(정리는 1/8 01:00)
+    const env = monthEnv(games, extra, {now: JAN1_9AM + days * DAY});
+    assert.doesNotMatch(env.ctx.dailyJobs(), /정리 예고/, 'day+' + days);
+    assert.strictEqual(env.of('https://ntfy.sh/').length, 0, 'day+' + days);
+    assert.strictEqual(env.props.CLIP_REMINDED, undefined);
+  }
+  // 월간이 끝나지 않은 달(waiting_tags·build·running·failed)의 경기는 75일 상한 규칙이라 예고 대상이다
+  const failed = monthEnv(decGames(['2026-11-01', '1경기', 'opponent']), {['monthly_2026-11.json']: monthlyDoc({month: '2026-11', status: 'failed'})},
+    {now: Date.UTC(2027, 0, 10)});
+  assert.match(failed.ctx.dailyJobs(), /월간: 정리 예고 1경기/);
+});
+
+test('정리 예고: 월간이 안 끝난 경기는 경기일 + 75일 7일 전에 경기마다 한 번만, 월간 화면 링크와 함께', () => {
+  const games = decGames(['2026-11-01', '1경기', 'opponent'], ['2026-11-02', '1경기', 'scrimmage']);   // 상한 1/15·1/16
+  const env = monthEnv(games, {}, {now: Date.UTC(2027, 0, 10)});
+  assert.match(env.ctx.dailyJobs(), /월간: 정리 예고 2경기/);
+  const [note] = env.of('https://ntfy.sh/');
+  assert.strictEqual(note.body.title, '경기 클립 2개 묶음이 곧 정리됩니다');
+  assert.match(note.body.message, /^01\/15 무렵부터 클립이 휴지통으로/);
+  assert.match(note.body.message, /2026-11-01-1경기-OO FC\n2026-11-02-1경기-청백전/);
+  assert.strictEqual(note.body.click, `${REVIEW_URL}?page=review&month=2026-11`);
+  env.now += DAY;
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 1);                    // 이미 알린 경기는 다시 안 알린다
+  assert.deepStrictEqual(JSON.parse(env.props.CLIP_REMINDED), ['2026-11-01_1경기', '2026-11-02_1경기']);
+});
+
+test('정리 예고: 7일보다 멀면 알리지 않고, 이미 정리된 경기·게시 전 경기는 알리지 않는다', () => {
+  const games = decGames(['2026-12-06', '1경기', 'opponent']);
+  assert.strictEqual(monthEnv(games, {}, {now: JAN1_9AM + 2 * DAY}).ctx.dailyJobs().indexOf('정리 예고'), -1);   // 상한까지 한참
+  const pending = [gameDoc({date: '2026-10-01', label: '1경기', status: 'pending', auto_at: '2999-01-01T00:00:00+09:00'})];
+  const env = monthEnv(pending, {}, {now: Date.UTC(2026, 11, 10)});                                          // 75일 상한이 코앞이지만 게시 전
+  env.ctx.dailyJobs();
+  assert.strictEqual(env.of('https://ntfy.sh/').length, 0);
+  const old = monthEnv(decGames(['2026-10-01', '1경기', 'opponent']), {}, {now: Date.UTC(2026, 11, 20)});   // 이미 상한을 넘김 — 러너가 정리
+  old.ctx.dailyJobs();
+  assert.strictEqual(old.of('https://ntfy.sh/').length, 0);
+});
+
+test('reviewList: 월간 카드는 그달 경기 전부로 세고(45일 창이 아니라) 이번 달 + 지난 2달만 보여 준다', () => {
+  const games = decGames(['2026-09-28', '1경기', 'opponent'],                       // 4달 전 — 목록에서 빠진다
+    ['2026-10-05', '1경기', null],                                                  // 76일 전 — 일별 목록엔 없지만 10월 카드엔 센다
+    ['2026-11-01', '1경기', 'opponent'], ['2026-11-29', '1경기', null],              // 11/1은 49일 전 — 11월 카드엔 센다
+    ['2026-12-06', '1경기', 'scrimmage']);
+  const env = monthEnv(games, {}, {now: Date.UTC(2026, 11, 20, 3)});
+  const list = plain(env.ctx.reviewList());
+  assert.deepStrictEqual(list.months.map((m) => [m.month, m.games, m.untagged]),
+    [['2026-12', 1, 0], ['2026-11', 2, 1], ['2026-10', 1, 1]]);                      // 9월은 없다. 11월 = 2경기(예전 방식이면 1경기)
+  assert.deepStrictEqual(list.days.map((d) => d.date), ['2026-12-06', '2026-11-29']);   // 일별 목록은 그대로 45일
+  assert.strictEqual(list.days.length, 2);
+  // 목록에서 빠진 달도 주소로는 열린다
+  assert.strictEqual(plain(env.ctx.reviewMonth('2026-09')).games.length, 1);
+});
+
+test('reviewList: 연도가 바뀌어도 이번 달 + 지난 2달을 센다', () => {
+  const games = decGames(['2026-11-10', '1경기', 'opponent'], ['2026-12-06', '1경기', null], ['2027-01-09', '1경기', null],
+    ['2026-10-31', '1경기', 'opponent']);
+  const env = monthEnv(games, {}, {now: Date.UTC(2027, 0, 12, 3)});
+  assert.deepStrictEqual(plain(env.ctx.reviewList()).months.map((m) => [m.month, m.games, m.untagged]),
+    [['2027-01', 1, 1], ['2026-12', 1, 1], ['2026-11', 1, 0]]);                      // 10월은 3달 밖
 });
 
 let failed = 0;

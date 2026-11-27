@@ -344,16 +344,19 @@ def description_first_line(name: str) -> str:
     return f"축구 하이라이트 — {name}"
 
 
+# 모든 설명의 맨 끝 — 경기 하이라이트(generate_description·러너)와 월간 영상(monthly.py)이 같이 쓴다
+DESCRIPTION_FOOTER = [
+    "---",
+    "이 영상은 HLEditor(https://github.com/sampark0626/HLEditor)로 자동 생성된 하이라이트입니다.",
+]
+
+
 def format_description(name: str, shot_lines: list[str]) -> str:
     """설명 본문: 첫 줄 + (슈팅 장면 목록) + 푸터. generate_description과 러너(publish.py)가 같이 쓴다."""
     lines = [description_first_line(name)]
     if shot_lines:
         lines += ["", "슈팅 장면", *shot_lines]
-    lines += [
-        "",
-        "---",
-        "이 영상은 HLEditor(https://github.com/sampark0626/HLEditor)로 자동 생성된 하이라이트입니다.",
-    ]
+    lines += ["", *DESCRIPTION_FOOTER]
     return "\n".join(lines)
 
 

@@ -353,6 +353,7 @@ var FLIP_END = {building: 'tree', tree: 'building'};
 var EDITABLE_STATES = ['pending', 'auto_published', 'published', 'failed'];   // publish·running은 러너가 읽는 중이라 고치지 않는다
 var PUBLISHABLE_STATES = ['pending', 'failed'];                                // failed는 "다시 게시"
 var PUBLISH_STATES = ['publish', 'running'];
+var UNPUBLISHED = ['pending', 'publish', 'running'];                          // 게시 전 — 클립이 유일한 재료라 정리하지 않는다
 var DONE_STATES = ['published', 'auto_published'];
 var MAX_RETITLE_ATTEMPTS = 3;
 var SHOT_TYPES = ['goal', 'shot', 'save'];
@@ -363,6 +364,20 @@ var TITLE_MAX = 100;
 var FILENAME_MAX = 30;
 var RECENT_OPPONENTS_KEY = 'RECENT_OPPONENTS';
 var RECENT_OPPONENTS_MAX = 8;
+
+// 월간 영상(Phase 3) — monthly_{YYYY-MM}.json: waiting_tags | build | running | done | failed
+var MONTHLY_ACTIVE = ['build', 'running'];                     // 러너가 처리할 상태
+var MONTHLY_REBUILDABLE = ['waiting_tags', 'done', 'failed'];  // "월간 다시 만들기"를 누를 수 있는 상태(문서가 없을 때도)
+var MONTHLY_FILE_RE = /^monthly_(\d{4}-\d{2})\.json$/;
+var MONTH_WAIT_DAYS = 7;       // 태깅을 이만큼 기다린 뒤에는 태깅 안 된 경기를 빼고 만든다
+var MONTH_REMIND_DAYS = 3;     // 태깅 안 된 경기 재알림
+// 클립 보관 기간 — retention.py의 같은 이름 상수와 tests/data/clip_rules.json이 기준이다. 러너는 이 값을 비밀값으로 못 바꾼다
+// (Apps Script는 Kaggle 비밀값을 못 읽어 같은 날짜를 계산할 수 없다). 바꾸려면 세 곳을 함께 고친다.
+var CLIP_KEEP_AFTER_DONE_DAYS = 7;   // 월간이 끝난 뒤 클립을 더 두는 날수
+var CLIP_MAX_DAYS = 75;              // 월간이 안 끝나도 경기일로부터 이만큼이면 클립 정리
+var CLIP_REMIND_DAYS = 7;            // 정리 이만큼 전에 알린다
+var CLIP_REMINDED_KEY = 'CLIP_REMINDED';
+var CLIP_REMINDED_MAX = 300;
 
 // ─── 소유자 확인 ─────────────────────────────────────────────────────────────
 /** 로그인한 사용자가 있고 스크립트 소유자(웹 앱 실행 계정)와 같을 때만 true. "모든 사용자" 배포에서는 이메일이 비어 거부된다. */
@@ -581,7 +596,8 @@ function addRequest_(folder, item) {
   var doc = readJson_(folder, REQUESTS_FILE) || {items: []};
   doc.items = doc.items || [];
   var exists = doc.items.some(function (it) {
-    return it.type === item.type && it.date === item.date && (it.label || '') === (item.label || '');
+    return it.type === item.type && it.date === item.date && (it.label || '') === (item.label || '') &&
+      (it.month || '') === (item.month || '');
   });
   if (exists) return;
   item.id = Utilities.getUuid();
@@ -597,8 +613,12 @@ function needsRetitle_(game) {
   return tagged !== null && (done === null || done < tagged);
 }
 
-/** 처리 여부는 대상 파일의 상태로 판단한다(러너는 대기열을 고치지 않는다). 모르는 종류(월간 — Phase 3)는 끝난 것으로 본다. */
+/** 처리 여부는 대상 파일의 상태로 판단한다(러너는 대기열을 고치지 않는다). 모르는 종류는 끝난 것으로 본다. */
 function requestDone_(folder, item) {
+  if (item.type === 'monthly') {
+    var m = readJson_(folder, monthlyName_(item.month));
+    return !m || MONTHLY_ACTIVE.indexOf(m.status) < 0;       // build·running일 때만 일거리
+  }
   if (item.type === 'publish') {
     return !listGames_(folder, {date: item.date}).some(function (g) {
       return PUBLISH_STATES.indexOf(g.status) >= 0;
@@ -696,7 +716,13 @@ function reviewList() {
   var folder = stateFolder_(rootFolderId_());
   var now = Date.now();
   var minDate = kstDate_(now - RECENT_DAYS * 86400000);
-  var games = listGames_(folder, {minDate: minDate});
+  // 월간 카드는 그달 경기 전부로 센다(45일 창으로 세면 경기 수·태깅 안 된 수가 실제보다 적게 보인다). 이번 달 + 지난 2달만 보여 주고,
+  // 더 오래된 달은 목록에서 빠지지만 ?page=review&month=YYYY-MM 주소로는 열린다.
+  var thisMonth = kstDate_(now).slice(0, 7);
+  var firstMonth = previousMonth_(previousMonth_(thisMonth + '-01') + '-01');
+  var monthFrom = firstMonth + '-01';
+  var all = listGames_(folder, {minDate: monthFrom < minDate ? monthFrom : minDate});
+  var games = all.filter(function (g) { return g.date >= minDate; });
   var days = [];
   games.forEach(function (g) {
     var day = days.length && days[days.length - 1].date === g.date ? days[days.length - 1] : null;
@@ -710,7 +736,22 @@ function reviewList() {
     });
   });
   days.reverse();                                    // 최근 날짜가 위로
-  return {today: kstDate_(now), days: days, opponents: recentOpponents_()};
+  // 월간 영상: 경기가 있는 달마다 상태(태깅 대기·만드는 중·완료 …)와 태깅 안 된 경기 수
+  var months = [], byMonth = {};
+  all.forEach(function (g) {
+    var m = g.date.slice(0, 7);
+    if (m < firstMonth) return;
+    if (!byMonth[m]) { byMonth[m] = {month: m, games: 0, untagged: 0}; months.push(byMonth[m]); }
+    byMonth[m].games++;
+    if (isUntagged_(g)) byMonth[m].untagged++;
+  });
+  months.forEach(function (m) {
+    var d = readJson_(folder, monthlyName_(m.month));
+    m.status = d ? d.status : 'none';
+    m.ytUrl = (d && d.yt_url) || null;
+  });
+  months.reverse();
+  return {today: kstDate_(now), days: days, months: months, opponents: recentOpponents_()};
 }
 
 /** 그날 경기들의 태깅 화면 데이터. */
@@ -769,9 +810,11 @@ function reviewSetGame(date, label, fields) {
       addRequest_(folder, {type: 'retitle', date: date, label: label});
       retitle = true;
     }
-    return {retitle: retitle, view: viewGame_(game, readJson_(folder, clipsName_(date, label)))};
+    // 월간이 태깅을 기다리는 중이었고 이 경기가 마지막 미태깅 경기였다면 바로 만들기 시작한다
+    var kick = maybeStartMonthly_(folder, game.date.slice(0, 7));
+    return {retitle: retitle, kick: kick, view: viewGame_(game, readJson_(folder, clipsName_(date, label)))};
   });
-  if (result.retitle) tick({force: true});
+  if (result.retitle || result.kick) tick({force: true});
   return result.view;
 }
 
@@ -871,16 +914,19 @@ function reviewRecentOpponents() {
  * 시간 트리거(installDailyTrigger)가 부른다.
  *  1) 자동 게시 시각(auto_at)이 지난 pending 경기를 publish로 바꾼다 — 검토 없이 전체 장면으로 올라간다.
  *     태그를 일부 눌러 둔 경기는 그 태그(잘못 잡힘·상대 이름)를 그대로 쓴다(tag_source=manual).
- *  2) 끝난 대기열 항목을 정리한다.
- *  3) 자동 게시한 경기가 있으면 러너를 깨우고 알림을 보낸다(누르면 검토 페이지 — 늦은 태깅).
+ *  2) 월간 영상(MONTHLY_PLAN.md 3-6): 매달 1일에는 지난달 월간을 만든다(태깅 안 된 경기가 있으면 태깅을 기다리며
+ *     알린다). 기다리는 월간은 3일 뒤 재알림, 7일 뒤에는 태깅 안 된 경기를 빼고 만든다. 클립 정리 7일 전에 예고한다.
+ *  3) 끝난 대기열 항목을 정리한다.
+ *  4) 자동 게시·월간 시작이 있으면 러너를 깨운다. 자동 게시는 알림도 보낸다(누르면 검토 페이지 — 늦은 태깅).
  */
 function dailyJobs() {
   try {
     var result = withLock_(dailyJobs_);
-    if (result.names.length) result.tick = tick({force: true});
+    if (result.names.length || result.kick) result.tick = tick({force: true});
     return log_('자동 게시 ' + result.names.length + '경기' +
       (result.names.length ? ' (' + result.names.join(', ') + ')' : '') +
-      ' · 정리한 요청 ' + result.cleaned + '건');
+      ' · 정리한 요청 ' + result.cleaned + '건' +
+      (result.monthly.length ? ' · 월간: ' + result.monthly.join(', ') : ''));
   } catch (e) {
     console.error(e);
     return '오류: ' + (e && e.message ? e.message : e);
@@ -889,7 +935,7 @@ function dailyJobs() {
 
 function dailyJobs_() {
   var folder = stateFolder_(rootFolderId_());
-  var result = {names: [], cleaned: 0};
+  var result = {names: [], cleaned: 0, monthly: [], kick: false};
   if (!folder) return result;
   var now = Date.now();
   var minDate = kstDate_(now - AUTO_LOOKBACK_DAYS * 86400000);
@@ -906,6 +952,12 @@ function dailyJobs_() {
     if (dates.indexOf(g.date) < 0) dates.push(g.date);
   });
   dates.forEach(function (d) { addRequest_(folder, {type: 'publish', date: d}); });
+
+  // 월간 영상 — 1일에는 지난달 월간을 만들고, 기다리는 월간을 확인하고, 클립 정리를 예고한다
+  var today = kstDate_(now);
+  if (today.slice(8, 10) === '01') monthlyCreate_(folder, previousMonth_(today), result);
+  monthlyCheckWaiting_(folder, now, result);
+  clipExpiryReminders_(folder, now, result);
 
   var doc = readJson_(folder, REQUESTS_FILE);
   if (doc && doc.items) {
@@ -929,4 +981,224 @@ function dailyJobs_() {
     }
   }
   return result;
+}
+
+// ═══ 월간 영상 · 클립 정리 (MONTHLY_PLAN.md Phase 3) ═══════════════════════════════
+// monthly_{YYYY-MM}.json 상태: waiting_tags(태깅을 기다림) → build(만들기 요청) → running → done | failed.
+// waiting_tags·build와 done·failed → build("월간 다시 만들기")는 이 파일이 쓰고, running 이후는 러너(monthly.py)가 쓴다.
+// 월간 영상에 넣을 장면 규칙은 위 monthlyEligible_(러너는 tags.py)이고, 장면 고르기·영상 만들기는 러너가 한다.
+
+function monthlyName_(month) { return 'monthly_' + month + '.json'; }
+
+function checkMonth_(month) {
+  if (!MONTH_RE.test(String(month || ''))) throw new Error('달 형식이 맞지 않습니다: ' + month);
+}
+
+function korMonth_(month) { return month.slice(0, 4) + '년 ' + Number(month.slice(5, 7)) + '월'; }
+
+function previousMonth_(dateStr) {
+  var y = Number(dateStr.slice(0, 4)), m = Number(dateStr.slice(5, 7)) - 1;
+  if (m < 1) { y -= 1; m = 12; }
+  return y + '-' + ('0' + m).slice(-2);
+}
+
+/** 태깅 안 된 경기 = 경기 종류(청백전/다른 팀)가 없는 경기. 월간에는 한 장면도 못 들어간다. */
+function isUntagged_(game) { return !game.kind; }
+
+function gamesOfMonth_(folder, month) {
+  return listGames_(folder, {minDate: month + '-01'}).filter(function (g) { return g.date.slice(0, 7) === month; });
+}
+
+function listMonthlies_(folder) {
+  var out = [];
+  if (!folder) return out;
+  var it = folder.getFiles();
+  while (it.hasNext()) {
+    var f = it.next();
+    var m = MONTHLY_FILE_RE.exec(f.getName());
+    if (!m || f.isTrashed()) continue;
+    var doc = parseFile_(f);
+    if (doc) { doc.month = doc.month || m[1]; out.push(doc); }
+  }
+  return out;
+}
+
+function notifySafe_(title, message, tags, click) {
+  try {
+    notify_(readConfig_(PropertiesService.getScriptProperties()), title, message, tags, click);
+  } catch (e) {
+    console.warn('알림 실패: ' + e);
+  }
+}
+
+function reviewLink_(query) {
+  var base = PropertiesService.getScriptProperties().getProperty('REVIEW_URL');
+  return base ? base + (base.indexOf('?') >= 0 ? '&' : '?') + 'page=review' + (query ? '&' + query : '') : null;
+}
+
+/** 월간을 만들 차례로 바꾸고 러너가 읽을 대기열에 넣는다. */
+function startMonthly_(folder, doc) {
+  doc.status = 'build';
+  doc.attempts = 0;
+  doc.error = null;
+  writeJson_(folder, monthlyName_(doc.month), doc);
+  addRequest_(folder, {type: 'monthly', month: doc.month});
+}
+
+/** 매달 1일: 지난달 월간 문서를 만든다. 태깅 안 된 경기가 있으면 waiting_tags로 기다리며 알리고, 없으면 바로 build. */
+function monthlyCreate_(folder, month, result) {
+  if (readJson_(folder, monthlyName_(month))) return;            // 이미 있다 — 같은 날 다시 불러도 한 번만
+  var games = gamesOfMonth_(folder, month);
+  if (!games.length) return;                                      // 경기가 없는 달은 만들지 않는다
+  var untagged = games.filter(isUntagged_);
+  var doc = {month: month, status: untagged.length ? 'waiting_tags' : 'build', picked: [], yt_url: null,
+             drive_file_id: null, drive_link: null, done_at: null, attempts: 0, error: null,
+             created_at: nowIso_(), reminded_at: null};
+  writeJson_(folder, monthlyName_(month), doc);
+  if (untagged.length) {
+    result.monthly.push(month + ' 태깅 대기(' + untagged.length + '경기)');
+    notifySafe_('태깅 안 된 경기 ' + untagged.length + '개',
+      korMonth_(month) + ' 월간 하이라이트를 만들려면 경기 종류(청백전 / 다른 팀)를 태깅해 주세요. ' +
+      '모두 태깅하면 바로 만들고, ' + MONTH_WAIT_DAYS + '일이 지나면 태깅 안 된 경기를 빼고 만듭니다.\n' +
+      untagged.map(function (g) { return gameName_(g.date, g.label); }).join('\n'),
+      ['warning'], reviewLink_('month=' + month));
+  } else {
+    addRequest_(folder, {type: 'monthly', month: month});
+    result.kick = true;
+    result.monthly.push(month + ' 만들기 시작');
+  }
+}
+
+/** 태깅을 기다리는 월간: 모두 태깅됐거나 7일이 지나면 만들기 시작, 3일 뒤에는 한 번 재알림. */
+function monthlyCheckWaiting_(folder, now, result) {
+  listMonthlies_(folder).forEach(function (doc) {
+    if (doc.status !== 'waiting_tags') return;
+    var untagged = gamesOfMonth_(folder, doc.month).filter(isUntagged_);
+    var created = parseTime_(doc.created_at);
+    var age = created === null ? 0 : now - created;
+    if (!untagged.length || age >= MONTH_WAIT_DAYS * 86400000) {
+      startMonthly_(folder, doc);
+      result.kick = true;
+      result.monthly.push(doc.month + (untagged.length ? ' 태깅 안 된 ' + untagged.length + '경기를 빼고 만들기 시작' : ' 만들기 시작'));
+    } else if (age >= MONTH_REMIND_DAYS * 86400000 && !doc.reminded_at) {
+      doc.reminded_at = nowIso_();
+      writeJson_(folder, monthlyName_(doc.month), doc);
+      result.monthly.push(doc.month + ' 재알림');
+      notifySafe_('태깅 안 된 경기 ' + untagged.length + '개 — ' + korMonth_(doc.month) + ' 월간 대기 중',
+        (MONTH_WAIT_DAYS - Math.floor(age / 86400000)) + '일 안에 태깅하지 않으면 태깅 안 된 경기를 빼고 만듭니다.\n' +
+        untagged.map(function (g) { return gameName_(g.date, g.label); }).join('\n'),
+        ['warning'], reviewLink_('month=' + doc.month));
+    }
+  });
+}
+
+/** 방금 한 태깅이 마지막 미태깅 경기였으면(태깅 대기 중이던 월간) 바로 만들기 시작한다. 시작했으면 true. */
+function maybeStartMonthly_(folder, month) {
+  var doc = readJson_(folder, monthlyName_(month));
+  if (!doc || doc.status !== 'waiting_tags') return false;
+  if (gamesOfMonth_(folder, month).some(isUntagged_)) return false;
+  doc.month = doc.month || month;
+  startMonthly_(folder, doc);
+  return true;
+}
+
+// ─── 클립 보관 규칙 (retention.py와 같다 — tests/data/clip_rules.json을 양쪽이 읽는다) ──────
+function monthlyDoneMs_(doc) {
+  return doc && doc.status === 'done' ? parseTime_(doc.done_at) : null;
+}
+
+/** 경기 클립이 정리되는 시각(ms): 경기일(KST 자정) + 75일, 월간이 끝났으면 그 뒤 7일과 중 이른 쪽. */
+function clipExpiresAt_(gameDate, doneMs) {
+  var cap = Date.parse(gameDate + 'T00:00:00+09:00') + CLIP_MAX_DAYS * 86400000;
+  if (doneMs === null || doneMs === undefined) return cap;
+  return Math.min(cap, doneMs + CLIP_KEEP_AFTER_DONE_DAYS * 86400000);
+}
+
+/**
+ * 정리 7일 전 예고(MONTHLY_PLAN.md 3-8) — 월간이 아직 안 끝난 경기의 클립이 경기일 + 75일 상한으로 곧 정리될 때만 알린다.
+ * 월간이 끝난 경기는 만료가 done + 7일이라 끝난 다음 날부터 "곧 정리됩니다"가 매번 울리므로 예고하지 않는다.
+ * 경기마다 한 번만(스크립트 속성에 기억).
+ */
+function clipExpiryReminders_(folder, now, result) {
+  var props = PropertiesService.getScriptProperties();
+  var reminded = [];
+  try { reminded = JSON.parse(props.getProperty(CLIP_REMINDED_KEY) || '[]'); } catch (e) { reminded = []; }
+  var monthlies = {};
+  listMonthlies_(folder).forEach(function (d) { monthlies[d.month] = d; });
+  var due = [];
+  var minDate = kstDate_(now - (CLIP_MAX_DAYS + 1) * 86400000);
+  listGames_(folder, {minDate: minDate}).forEach(function (g) {
+    if (UNPUBLISHED.indexOf(g.status) >= 0) return;               // 게시 전 경기의 클립은 정리하지 않는다
+    var key = g.date + '_' + g.label;
+    if (reminded.indexOf(key) >= 0) return;
+    if (monthlyDoneMs_(monthlies[g.date.slice(0, 7)]) !== null) return;      // 월간이 끝난 경기는 예고하지 않는다
+    var exp = clipExpiresAt_(g.date, null);                                    // 경기일 + 75일
+    if (exp > now && exp - now <= CLIP_REMIND_DAYS * 86400000) due.push({key: key, game: g, exp: exp});
+  });
+  if (!due.length) return;
+  var months = [];
+  due.forEach(function (d) { var m = d.game.date.slice(0, 7); if (months.indexOf(m) < 0) months.push(m); });
+  var first = Math.min.apply(null, due.map(function (d) { return d.exp; }));
+  notifySafe_('경기 클립 ' + due.length + '개 묶음이 곧 정리됩니다',
+    kstDate_(first).slice(5).replace('-', '/') + ' 무렵부터 클립이 휴지통으로 옮겨집니다. 월간 영상을 고쳐 다시 만들려면 ' +
+    '그 전에 태깅하고 \'월간 다시 만들기\'를 누르세요.\n' +
+    due.map(function (d) { return gameName_(d.game.date, d.game.label, d.game.kind, d.game.opponent); }).join('\n'),
+    ['soccer'], months.length === 1 ? reviewLink_('month=' + months[0]) : reviewLink_(''));
+  props.setProperty(CLIP_REMINDED_KEY, JSON.stringify(reminded.concat(due.map(function (d) { return d.key; }))
+    .slice(-CLIP_REMINDED_MAX)));
+  result.monthly.push('정리 예고 ' + due.length + '경기');
+}
+
+// ─── 월간 화면 서버 함수 (소유자만) ──────────────────────────────────────────
+function viewMonthly_(doc) {
+  if (!doc) return {status: 'none'};
+  return {
+    status: doc.status, ytUrl: doc.yt_url || null, driveLink: doc.drive_link || null, doneAt: doc.done_at || null,
+    createdAt: doc.created_at || null, error: doc.error || null, attempts: Number(doc.attempts || 0),
+    pickedCount: (doc.picked || []).length, durationSec: doc.duration_sec || null,
+    canBuild: MONTHLY_ACTIVE.indexOf(doc.status) < 0
+  };
+}
+
+/** 월간 화면: 그달 경기(태깅 여부·월간 대상 장면 수·클립이 정리됐는지)와 월간 상태. */
+function reviewMonth(month) {
+  assertOwner_();
+  checkMonth_(month);
+  var folder = stateFolder_(rootFolderId_());
+  var games = gamesOfMonth_(folder, month);
+  var monthly = viewMonthly_(readJson_(folder, monthlyName_(month)));
+  if (monthly.status === 'none') monthly.canBuild = games.length > 0;
+  return {
+    month: month, monthly: monthly,
+    untagged: games.filter(isUntagged_).length,
+    games: games.map(function (g) {
+      var clipsDoc = readJson_(folder, clipsName_(g.date, g.label));
+      var clips = (clipsDoc && clipsDoc.clips) || [];
+      return {date: g.date, label: g.label, name: gameName_(g.date, g.label, g.kind, g.opponent), kind: g.kind || null,
+              tagged: !isUntagged_(g), status: g.status, clipCount: clips.length,
+              monthlyCount: monthlyEligible_(clips, g).length, expired: !!(clipsDoc && clipsDoc.expired)};
+    })
+  };
+}
+
+/**
+ * "월간 다시 만들기"(또는 지금 만들기): 태깅을 고친 뒤 눌러 새로 만든다. 태깅 대기 중이면 태깅 안 된 경기를 빼고 지금 만든다.
+ * 이미 만드는 중이면 거부. 월간 문서가 없는 달도 경기가 있으면 만들 수 있다(1일 자동 생성을 놓쳤을 때).
+ */
+function reviewRebuildMonth(month) {
+  assertOwner_();
+  checkMonth_(month);
+  var out = withLock_(function () {
+    var folder = requireState_();
+    if (!gamesOfMonth_(folder, month).length) throw new Error(korMonth_(month) + '에 경기 기록이 없습니다');
+    var doc = readJson_(folder, monthlyName_(month));
+    if (doc && MONTHLY_ACTIVE.indexOf(doc.status) >= 0) throw new Error('이미 만드는 중입니다(상태: ' + doc.status + ')');
+    doc = doc || {month: month, picked: [], yt_url: null, drive_file_id: null, drive_link: null, done_at: null,
+                  created_at: nowIso_(), reminded_at: null};
+    doc.month = month;
+    startMonthly_(folder, doc);
+    return {started: true};
+  });
+  out.tick = tick({force: true});
+  return out;
 }

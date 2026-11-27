@@ -23,7 +23,6 @@ import soccer_highlights as sh
 import youtube_uploader as yt_up
 from kaggle_runner import naming, tags
 from kaggle_runner.common import (
-    REQUESTS_FILE,
     clips_file,
     day_file,
     from_iso,
@@ -78,22 +77,13 @@ class Publisher:
 
     def __init__(self, runner):
         self.r = runner
-        # process_requests는 한 실행에서 여러 번 불린다(시작·기다리는 동안·끝). 제목 변경은 실패해도 같은 실행에서
+        # handle은 한 실행에서 여러 번 불린다(시작·기다리는 동안·끝). 제목 변경은 실패해도 같은 실행에서
         # 두 번 시도·보고하지 않는다(publish는 status가 failed로 바뀌어 저절로 한 번만 된다).
         self._retitle_tried: set[tuple[str, str]] = set()
 
     # 대기열 ----------------------------------------------------------------
-    def process_requests(self) -> int:
-        """requests.json의 publish·retitle 요청을 처리하고, 건드린 경기 수를 돌려준다."""
-        r = self.r
-        try:
-            doc = r.store.read_json(REQUESTS_FILE)
-        except Exception as e:
-            if is_auth_error(e):
-                raise
-            r.log(f"요청 대기열을 읽지 못했습니다(다음에 다시 확인): {e!r}")
-            return 0
-        items = (doc or {}).get("items") or []
+    def handle(self, items: list[dict]) -> int:
+        """대기열(requests.json — 러너가 읽어 넘겨 준다)의 publish·retitle 요청을 처리하고 건드린 경기 수를 돌려준다."""
         handled = 0
         dates = list(dict.fromkeys(i["date"] for i in items if i.get("type") == "publish" and i.get("date")))
         for date in dates:

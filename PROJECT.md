@@ -395,6 +395,13 @@ YouTube에 올리고, **ntfy 알림으로 그날의 BAND 글 전체**를 보낸�
    (pending·태그·publish 요청 = Apps Script, running 이후 = 러너 — `requests.json`은 Apps Script만 쓰고 러너는 읽기만).
    주간/월간 클립 규칙은 `tags.py`와 `Code.gs`가 같고 `tests/data/tag_rules.json`을 양쪽 테스트가 읽는다.
    클립 보관에 실패하면 검토 없이 예전처럼 바로 게시한다(영상을 잃지 않는다).
+8-2. **월간 영상·클립 정리(Phase 3)** — `dailyJobs`가 매달 1일 09:00에 지난달 `monthly_{YYYY-MM}.json`을 만든다(경기 종류가 없는
+   경기가 있으면 `waiting_tags` — 모두 태깅하면 즉시, 7일 뒤엔 그 경기만 빼고 `build`). 러너 `monthly.py`가 `build` 요청을 읽어 월간 대상 클립
+   (`tags.monthly_eligible`)을 점수(정규화한 delta_db + confidence + 팬 상태 0.1) 순으로 경기당 4·경기일당 8개, 6분까지 고르고
+   카드와 함께 **같은 규격으로 재인코딩**(첫 클립의 해상도·fps, CRF 20, 카드는 무음)해 Drive `07_monthly`에 **먼저** 올린 뒤 YouTube에 올린다.
+   `retention.py`는 클립을 월간 `done` + 7일(늦어도 경기일 + 75일, 만든 지 7일 미만·게시 전 경기는 제외)에 휴지통으로 보내고 clips JSON에 `expired`를
+   적는다. 만료 규칙은 `retention.py`·`Code.gs`가 같고 `tests/data/clip_rules.json`을 양쪽 테스트가 읽는다. 상태 전이의 쓰는 쪽: `waiting_tags`·`build`·
+   "다시 만들기" = Apps Script, `running` 이후 = 러너.
 9. `kernel_bootstrap.py`는 main 브랜치를 매번 clone한다 → **main에 push하면 바로 운영에 반영**된다.
    Apps Script에 같은 내용의 내장 사본(`BOOTSTRAP_FALLBACK`)이 있어, 바꾸면 둘 다 고친다
    (`node kaggle_runner/apps_script/code_test.js`가 둘이 같은지 검사한다).

@@ -22,7 +22,7 @@ It runs in two modes, both operated by the same single user (the club manager) w
 | YouTube OAuth token | Authenticate with YouTube API to upload videos | Local file (`youtube_token.json`) on user's machine only |
 | Google OAuth refresh token (automated mode: Google Drive + YouTube) | Read the user's uploaded match videos and upload the highlight to the user's YouTube channel | The user's own **private** Kaggle dataset, accessible only to the user |
 | Match videos (automated mode) | Highlight extraction | Uploaded by the user to their own Google Drive folder; processed in the user's own Kaggle session (temporary copies deleted after use); originals moved to the Drive trash after 7 days by default |
-| Highlight clips and review records (automated mode, optional) | Keeping the scenes of each match so the user can review/tag them on the phone and build a monthly video | Stored only in the user's own Google Drive (`06_clips`, `_state`); the review page is a Google Apps Script web app deployed "only me" in the user's own account and shows clips through Drive's own preview |
+| Highlight clips, review records and monthly videos (automated mode, optional) | Keeping the scenes of each match so the user can review/tag them on the phone and build a monthly highlight video | Stored only in the user's own Google Drive (`06_clips`, `07_monthly`, `_state`); clips are moved to the Drive trash 7 days after the month's video is finished (at the latest 75 days after the match), monthly videos and records are kept; the review page is a Google Apps Script web app deployed "only me" in the user's own account and shows clips through Drive's own preview |
 | Processing records (automated mode) | Game numbering, the BAND post text, AI classification results | JSON files in the same Drive folder (`HLEditor/_state`) |
 | Video files (desktop mode) | Local processing for highlight extraction | Processed locally, temporary files deleted after use |
 
@@ -74,7 +74,7 @@ HLEditor는 아마추어 축구 동호회를 위한 도구입니다. 경기 영�
 | YouTube OAuth 인증 토큰 | YouTube API 인증 (영상 업로드용) | 사용자 로컬 파일(`youtube_token.json`)에만 저장 |
 | Google OAuth refresh token (자동 처리: Google Drive + YouTube) | 사용자가 올린 경기 영상 읽기, 하이라이트를 사용자 본인 YouTube 채널에 업로드 | 사용자 본인만 접근할 수 있는 **비공개** Kaggle 데이터셋 |
 | 경기 영상 (자동 처리) | 하이라이트 추출 | 사용자가 본인 Google Drive 폴더에 업로드. 본인 Kaggle 세션에서 처리(임시 사본은 작업 후 삭제). 원본은 기본 7일 뒤 Drive 휴지통으로 이동 |
-| 하이라이트 클립·검토 기록 (자동 처리, 선택) | 경기별 장면을 보관해 폰에서 검토·태깅하고 월간 영상을 만드는 데 사용 | 사용자 본인 Google Drive(`06_clips`, `_state`)에만 저장. 검토 페이지는 사용자 본인 계정의 Apps Script 웹 앱('나만' 배포)이며 클립은 Drive 자체 미리보기로 보여 줍니다 |
+| 하이라이트 클립·검토 기록·월간 영상 (자동 처리, 선택) | 경기별 장면을 보관해 폰에서 검토·태깅하고 월간 하이라이트 영상을 만드는 데 사용 | 사용자 본인 Google Drive(`06_clips`, `07_monthly`, `_state`)에만 저장. 클립은 그달 월간 영상이 끝난 뒤 7일(늦어도 경기 후 75일)에 Drive 휴지통으로 이동하고, 월간 영상과 기록은 보관합니다. 검토 페이지는 사용자 본인 계정의 Apps Script 웹 앱('나만' 배포)이며 클립은 Drive 자체 미리보기로 보여 줍니다 |
 | 처리 기록 (자동 처리) | 경기 번호, BAND 게시 문구, AI 판별 결과 | 같은 Drive 폴더(`HLEditor/_state`)의 JSON 파일 |
 | 영상 파일 (PC 방식) | 하이라이트 추출 (로컬 처리) | 로컬에서만 처리, 임시 파일은 작업 후 자동 삭제 |
 

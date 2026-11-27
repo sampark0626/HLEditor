@@ -24,7 +24,7 @@ FOLDERS = {
     "failed": "04_failed",
     "output": "05_output",
     "clips": "06_clips",         # 경기별 하이라이트 클립 보관(MONTHLY_PLAN.md 3-8). 월간 영상의 재료
-    "monthly": "07_monthly",     # 월간 영상 영구 보관(Phase 3에서 쓴다)
+    "monthly": "07_monthly",     # 월간 영상 영구 보관 — 지우지 않는다(monthly.py)
     "state": "_state",
 }
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi"}

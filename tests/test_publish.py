@@ -353,6 +353,24 @@ def test_each_publish_game_of_the_day_is_uploaded_in_order(tmp_path, monkeypatch
     assert note["message"].index("2026-09-27-1경기") < note["message"].index("2026-09-27-2경기")
 
 
+def test_publish_requests_go_out_before_new_videos_are_analysed(tmp_path, monkeypatch, yt):
+    """게시는 빨리 나가야 한다 — 실행 시작 때 대기열의 게시 요청을 새 영상 분석보다 먼저 처리한다."""
+    h = analyzed(tmp_path, monkeypatch)
+    publish_request(h, tag_source="auto")
+    h.add("g2.mp4", 1500, start_min=60)
+    built_when_uploaded = []
+    real = yt.upload
+
+    def spy(*args, **kw):
+        built_when_uploaded.append(len(h.built))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(ir.yt_up, "upload_video", spy)
+    h.run()
+    assert built_when_uploaded == [1]                                        # 새 영상(g2)은 아직 분석 전이었다
+    assert len(h.built) == 2 and games(h, "2경기")["status"] == "pending"
+
+
 def test_missing_clip_file_fails_the_game_with_a_reason(tmp_path, monkeypatch, yt):
     h = analyzed(tmp_path, monkeypatch)
     (h.root / "06_clips" / f"{GAME}_c002.mp4").unlink()

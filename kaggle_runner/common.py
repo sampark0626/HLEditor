@@ -48,6 +48,11 @@ def games_file(date_str: str, label: str) -> str:
     return f"games_{date_str}_{label}.json"
 
 
+def monthly_file(month: str) -> str:
+    """월간 영상 상태 — `monthly_2026-12.json`(MONTHLY_PLAN.md 3-4)."""
+    return f"monthly_{month}.json"
+
+
 def is_auth_error(exc: BaseException) -> bool:
     """Google 자격 증명이 죽은 경우(refresh token 만료·취소)인지."""
     try:
